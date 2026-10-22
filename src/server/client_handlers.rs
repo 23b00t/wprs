@@ -466,6 +466,46 @@ impl WprsServerState {
                         .location(loc!())?;
                     }
                 }
+
+                // The compositor's state is authoritative for held modifiers
+                // as well: a modifier release that never reached us as a key
+                // event (e.g. focus moved by a compositor binding while it was
+                // held) would otherwise stay pressed here and turn every key
+                // into Super+key etc.
+                let mod_state = keyboard.modifier_state();
+                for (new_modifier, current_modifier, keycodes) in [
+                    (
+                        modifier_state.ctrl,
+                        mod_state.ctrl,
+                        [/* KEY_LEFTCTRL */ 29, /* KEY_RIGHTCTRL */ 97],
+                    ),
+                    (
+                        modifier_state.alt,
+                        mod_state.alt,
+                        [/* KEY_LEFTALT */ 56, /* KEY_RIGHTALT */ 100],
+                    ),
+                    (
+                        modifier_state.shift,
+                        mod_state.shift,
+                        [/* KEY_LEFTSHIFT */ 42, /* KEY_RIGHTSHIFT */ 54],
+                    ),
+                    (
+                        modifier_state.logo,
+                        mod_state.logo,
+                        [/* KEY_LEFTMETA */ 125, /* KEY_RIGHTMETA */ 126],
+                    ),
+                ] {
+                    if current_modifier && !new_modifier {
+                        for keycode in keycodes {
+                            self.set_key_state(
+                                keycode,
+                                KeyState::Released,
+                                SERIAL_COUNTER.next_serial(),
+                            )
+                            .location(loc!())?;
+                        }
+                    }
+                }
             },
         }
 
