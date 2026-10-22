@@ -36,6 +36,7 @@ use smithay::wayland::compositor::SurfaceData;
 use smithay::wayland::compositor::TraversalAction;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::selection::primary_selection::PrimarySelectionState;
+use smithay::wayland::selection::wlr_data_control::DataControlState;
 use smithay::wayland::shell::kde::decoration::KdeDecorationState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
@@ -89,6 +90,7 @@ pub struct WprsServerState {
     pub start_time: Instant,
     pub frame_interval: Duration,
     pub xwayland_enabled: bool,
+    pub selection_sync: bool,
     pub xdg_shell_state: XdgShellState,
     pub xdg_decoration_state: XdgDecorationState,
     // TODO(https://gitlab.gnome.org/GNOME/gtk/-/merge_requests/6398): rip this
@@ -99,6 +101,7 @@ pub struct WprsServerState {
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub primary_selection_state: PrimarySelectionState,
+    pub data_control_state: DataControlState,
     pub viewporter_state: ViewporterState,
 
     pub seat: Seat<Self>,
@@ -133,6 +136,7 @@ impl WprsServerState {
         xwayland_enabled: bool,
         frame_interval: Duration,
         kde_server_side_decorations: bool,
+        selection_sync: bool,
     ) -> Self {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "wprs");
@@ -141,6 +145,11 @@ impl WprsServerState {
         } else {
             KdeDecorationMode::Client
         };
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        // Lets local clients (e.g. wl-copy/wl-paste) use the selections without
+        // a window, which matters most when they aren't synced to the client.
+        let data_control_state =
+            DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_| true);
 
         Self {
             dh: dh.clone(),
@@ -148,6 +157,7 @@ impl WprsServerState {
             compositor_state: CompositorState::new::<Self>(&dh),
             start_time: Instant::now(),
             xwayland_enabled,
+            selection_sync,
             frame_interval,
             xdg_shell_state: XdgShellState::new::<Self>(&dh),
             xdg_decoration_state: XdgDecorationState::new::<Self>(&dh),
@@ -155,7 +165,8 @@ impl WprsServerState {
             shm_state: ShmState::new::<Self>(&dh, Vec::new()),
             seat_state,
             data_device_state: DataDeviceState::new::<Self>(&dh),
-            primary_selection_state: PrimarySelectionState::new::<Self>(&dh),
+            primary_selection_state,
+            data_control_state,
             viewporter_state: ViewporterState::new::<Self>(&dh),
             seat,
             serializer,

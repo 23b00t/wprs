@@ -64,6 +64,7 @@ pub struct WprsdConfig {
     xwayland_xdg_shell_wayland_debug: bool,
     xwayland_xdg_shell_args: Vec<String>,
     kde_server_side_decorations: bool,
+    selection_sync: bool,
 }
 
 impl Default for WprsdConfig {
@@ -83,6 +84,7 @@ impl Default for WprsdConfig {
             xwayland_xdg_shell_wayland_debug: false,
             xwayland_xdg_shell_args: Vec::new(),
             kde_server_side_decorations: false,
+            selection_sync: true,
         }
     }
 }
@@ -127,6 +129,13 @@ fn kde_server_side_decorations() -> impl Parser<Option<bool>> {
         .optional()
 }
 
+fn selection_sync() -> impl Parser<Option<bool>> {
+    bpaf::long("selection-sync")
+        .argument::<bool>("BOOL")
+        .help("Whether to sync the clipboard and primary selection with the client. When false, selections stay on the server side (e.g. to isolate a VM's clipboard from the host's); local clients can still use them, including via wlr-data-control (wl-copy/wl-paste).")
+        .optional()
+}
+
 impl OptionalConfig<WprsdConfig> for OptionalWprsdConfig {
     fn parse_args() -> Self {
         let print_default_config_and_exit = args::print_default_config_and_exit();
@@ -143,6 +152,7 @@ impl OptionalConfig<WprsdConfig> for OptionalWprsdConfig {
         let xwayland_xdg_shell_wayland_debug = xwayland_xdg_shell_wayland_debug();
         let xwayland_xdg_shell_args = xwayland_xdg_shell_args();
         let kde_server_side_decorations = kde_server_side_decorations();
+        let selection_sync = selection_sync();
         bpaf::construct!(Self {
             print_default_config_and_exit,
             config_file,
@@ -158,6 +168,7 @@ impl OptionalConfig<WprsdConfig> for OptionalWprsdConfig {
             xwayland_xdg_shell_wayland_debug,
             xwayland_xdg_shell_args,
             kde_server_side_decorations,
+            selection_sync,
         })
         .to_options()
         .run()
@@ -261,6 +272,7 @@ pub fn main() -> Result<()> {
         config.enable_xwayland,
         frame_interval,
         config.kde_server_side_decorations,
+        config.selection_sync,
     );
 
     init_wayland_listener(&config.wayland_display, display, &mut state, &event_loop)

@@ -918,6 +918,8 @@ impl WprsServerState {
                     },
                 );
             },
+            DataEvent::DestinationEvent(DataDestinationEvent::SelectionSet(..))
+                if !self.selection_sync => {},
             DataEvent::DestinationEvent(DataDestinationEvent::SelectionSet(source, metadata)) => {
                 match source {
                     DataSource::Selection => data_device::set_data_device_selection(

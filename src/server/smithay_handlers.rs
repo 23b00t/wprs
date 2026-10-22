@@ -82,6 +82,8 @@ use smithay::wayland::selection::SelectionSource;
 use smithay::wayland::selection::SelectionTarget;
 use smithay::wayland::selection::primary_selection::PrimarySelectionHandler;
 use smithay::wayland::selection::primary_selection::PrimarySelectionState;
+use smithay::wayland::selection::wlr_data_control::DataControlHandler;
+use smithay::wayland::selection::wlr_data_control::DataControlState;
 use smithay::wayland::shell::kde::decoration::KdeDecorationHandler;
 use smithay::wayland::shell::kde::decoration::KdeDecorationState;
 use smithay::wayland::shell::xdg::Configure;
@@ -425,6 +427,9 @@ impl SelectionHandler for WprsServerState {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
+        if !self.selection_sync {
+            return;
+        }
         if let Some(source) = source {
             self.serializer
                 .writer()
@@ -476,6 +481,12 @@ impl SelectionHandler for WprsServerState {
 impl DataDeviceHandler for WprsServerState {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
+    }
+}
+
+impl DataControlHandler for WprsServerState {
+    fn data_control_state(&self) -> &DataControlState {
+        &self.data_control_state
     }
 }
 
@@ -1259,4 +1270,5 @@ smithay::delegate_seat!(WprsServerState);
 smithay::delegate_data_device!(WprsServerState);
 smithay::delegate_output!(WprsServerState);
 smithay::delegate_primary_selection!(WprsServerState);
+smithay::delegate_data_control!(WprsServerState);
 smithay::delegate_viewporter!(WprsServerState);
