@@ -17,7 +17,6 @@ use std::convert::Into;
 use std::fmt;
 use std::io::Read;
 use std::io::Write;
-use std::mem;
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -530,12 +529,13 @@ impl ShardingDecompressor {
             .location(loc!())?;
         self.collect_shards(indices.len());
 
-        let len = self.buffer.len();
-        let buf = mem::replace(&mut self.buffer, DivBufShared::from(vec![0; len]));
+        // Copy the frame out and keep the buffer. Replacing the 36 MB buffer
+        // per frame mapped fresh zero pages every time (calloc above glibc's
+        // mmap threshold): one page fault per 4 KiB written, each a hypercall
+        // in a Xen PV dom0, and a munmap per frame.
         // We dropped mut_buf and all the buffers in the decompressor threads
         // have been freed already, so this should never fail.
-        let mut vec: Vec<u8> = buf.try_into().unwrap();
-        vec.truncate(uncompressed_size);
-        Ok(vec)
+        let data = self.buffer.try_const().unwrap().split_to(uncompressed_size);
+        Ok(data.to_vec())
     }
 }
