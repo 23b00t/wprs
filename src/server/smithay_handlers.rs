@@ -135,6 +135,10 @@ use crate::serialization::SendType;
 use crate::server::LockedSurfaceState;
 use crate::server::WprsServerState;
 
+/// Frame callbacks wait while more messages than this are queued for the
+/// client (see the frame timer below).
+const MAX_QUEUED_FOR_FRAME: usize = 4;
+
 impl BufferHandler for WprsServerState {
     #[instrument(skip(self), level = "debug")]
     fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {}
@@ -798,7 +802,13 @@ pub fn commit_impl(
                         return TimeoutAction::Drop;
                     }
 
-                    if state.serializer.other_end_connected() {
+                    // Back pressure: while the client hasn't taken the
+                    // previous frames, hold the callback, so the app draws
+                    // at the rate the link sustains instead of filling an
+                    // unbounded queue (wprsd OOM-killed during video).
+                    if state.serializer.other_end_connected()
+                        && state.serializer.queued() <= MAX_QUEUED_FOR_FRAME
+                    {
                         // We can't use into_iter() because we can't move
                         // frame_callbacks because this is a FnMut. However, this
                         // works because this branch will only ever be taken once.

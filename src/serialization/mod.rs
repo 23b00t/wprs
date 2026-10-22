@@ -649,6 +649,11 @@ where
         self.other_end_connected.load(Ordering::Acquire)
     }
 
+    /// Messages waiting for the writer thread (not yet on the socket).
+    pub fn queued(&self) -> usize {
+        self.write_handle.sender.len()
+    }
+
     pub fn set_other_end_connected(&mut self, state: bool) {
         self.other_end_connected.store(state, Ordering::Relaxed);
     }
