@@ -77,6 +77,10 @@ impl RemoteXdgToplevel {
 
         let local_window =
             xdg_shell_state.create_window(local_surface, WindowDecorations::ServerDefault, qh);
+        // Until the remote window sets a title (it may never do so).
+        if !title_prefix.is_empty() {
+            local_window.set_title(title_prefix.trim_end());
+        }
 
         {
             let toplevel_state = surface_state
@@ -139,9 +143,15 @@ impl RemoteXdgToplevel {
     fn set_title(&mut self, title: Option<String>) {
         if self.title != title {
             self.title = title;
-            if let Some(title) = &self.title {
-                self.local_window
-                    .set_title(format!("{}{}", self.title_prefix, title));
+            match &self.title {
+                Some(title) => self
+                    .local_window
+                    .set_title(format!("{}{}", self.title_prefix, title)),
+                // Windows without a title must still carry the prefix.
+                None if !self.title_prefix.is_empty() => {
+                    self.local_window.set_title(self.title_prefix.trim_end())
+                },
+                None => {},
             }
         }
     }
