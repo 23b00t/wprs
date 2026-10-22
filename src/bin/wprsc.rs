@@ -57,6 +57,7 @@ pub struct WprscConfig {
     pub log_priv_data: bool,
     pub title_prefix: String,
     pub app_id_prefix: String,
+    pub deny_fullscreen: bool,
 }
 
 impl Default for WprscConfig {
@@ -72,6 +73,7 @@ impl Default for WprscConfig {
             log_priv_data: false,
             title_prefix: String::new(),
             app_id_prefix: String::new(),
+            deny_fullscreen: false,
         }
     }
 }
@@ -80,6 +82,13 @@ impl Config for WprscConfig {
     fn config_file(&self) -> PathBuf {
         self.config_file.clone()
     }
+}
+
+fn deny_fullscreen() -> impl Parser<Option<bool>> {
+    bpaf::long("deny-fullscreen")
+        .argument::<bool>("BOOL")
+        .help("Ignore fullscreen requests from remote applications, both when a window is mapped and later. Fullscreen then only happens when the local compositor sets it (e.g. by a keybinding); leaving fullscreen is still possible.")
+        .optional()
 }
 
 impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
@@ -94,6 +103,7 @@ impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
         let log_priv_data = args::log_priv_data();
         let title_prefix = args::title_prefix();
         let app_id_prefix = args::app_id_prefix();
+        let deny_fullscreen = deny_fullscreen();
         bpaf::construct!(Self {
             print_default_config_and_exit,
             config_file,
@@ -105,6 +115,7 @@ impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
             log_priv_data,
             title_prefix,
             app_id_prefix,
+            deny_fullscreen,
         })
         .to_options()
         .run()
@@ -156,6 +167,7 @@ fn main() -> Result<()> {
     let options = ClientOptions {
         title_prefix: config.title_prefix,
         app_id_prefix: config.app_id_prefix,
+        deny_fullscreen: config.deny_fullscreen,
     };
     let mut state = WprsClientState::new(
         event_queue.handle(),

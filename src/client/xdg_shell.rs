@@ -67,6 +67,7 @@ impl RemoteXdgToplevel {
         object_bimap: &mut ObjectBimap,
         title_prefix: &str,
         app_id_prefix: &str,
+        deny_fullscreen: bool,
     ) -> Result<()> {
         let local_surface = {
             let surface = surfaces.get_mut(&surface_id).location(loc!())?;
@@ -115,7 +116,9 @@ impl RemoteXdgToplevel {
 
             if let Some(fullscreen) = toplevel_state.fullscreen {
                 if fullscreen {
-                    local_window.set_fullscreen(None);
+                    if !deny_fullscreen {
+                        local_window.set_fullscreen(None);
+                    }
                 } else {
                     local_window.unset_fullscreen();
                 }
@@ -252,6 +255,7 @@ impl RemoteXdgToplevel {
         object_bimap: &mut ObjectBimap,
         title_prefix: &str,
         app_id_prefix: &str,
+        deny_fullscreen: bool,
     ) -> Result<()> {
         Self::set_role(
             client_id,
@@ -263,6 +267,7 @@ impl RemoteXdgToplevel {
             object_bimap,
             title_prefix,
             app_id_prefix,
+            deny_fullscreen,
         )
         .location(loc!())?;
         let surface = surfaces.get_mut(&surface_id).location(loc!())?;

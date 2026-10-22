@@ -156,6 +156,7 @@ impl WprsClientState {
                 &mut self.object_bimap,
                 &self.title_prefix,
                 &self.app_id_prefix,
+                self.deny_fullscreen,
             )
             .location(loc!())?,
             Some(wayland::Role::XdgPopup(_)) => RemoteXdgPopup::apply(
@@ -266,7 +267,9 @@ impl WprsClientState {
                     toplevel.local_window.unset_maximized();
                 },
                 ToplevelRequestPayload::SetFullscreen => {
-                    toplevel.local_window.set_fullscreen(None);
+                    if !self.deny_fullscreen {
+                        toplevel.local_window.set_fullscreen(None);
+                    }
                 },
                 ToplevelRequestPayload::UnsetFullscreen => {
                     toplevel.local_window.unset_fullscreen();
