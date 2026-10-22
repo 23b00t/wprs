@@ -104,6 +104,7 @@ impl ObjectBimapExt for ObjectBimap {
 
 pub struct ClientOptions {
     pub title_prefix: String,
+    pub app_id_prefix: String,
 }
 
 pub struct WprsClientState {
@@ -148,6 +149,7 @@ pub struct WprsClientState {
     current_focus: Option<WlSurface>,
 
     title_prefix: String,
+    app_id_prefix: String,
 
     buffer_cache: Option<UncompressedBufferData>,
 }
@@ -216,6 +218,7 @@ impl WprsClientState {
             last_mouse_down_serial: None,
             current_focus: None,
             title_prefix: options.title_prefix,
+            app_id_prefix: options.app_id_prefix,
             buffer_cache: None,
         })
     }

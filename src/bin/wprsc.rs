@@ -56,6 +56,7 @@ pub struct WprscConfig {
     pub file_log_level: SerializableLevel,
     pub log_priv_data: bool,
     pub title_prefix: String,
+    pub app_id_prefix: String,
 }
 
 impl Default for WprscConfig {
@@ -70,6 +71,7 @@ impl Default for WprscConfig {
             file_log_level: SerializableLevel(Level::TRACE),
             log_priv_data: false,
             title_prefix: String::new(),
+            app_id_prefix: String::new(),
         }
     }
 }
@@ -91,6 +93,7 @@ impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
         let file_log_level = args::file_log_level();
         let log_priv_data = args::log_priv_data();
         let title_prefix = args::title_prefix();
+        let app_id_prefix = args::app_id_prefix();
         bpaf::construct!(Self {
             print_default_config_and_exit,
             config_file,
@@ -101,6 +104,7 @@ impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
             file_log_level,
             log_priv_data,
             title_prefix,
+            app_id_prefix,
         })
         .to_options()
         .run()
@@ -151,6 +155,7 @@ fn main() -> Result<()> {
 
     let options = ClientOptions {
         title_prefix: config.title_prefix,
+        app_id_prefix: config.app_id_prefix,
     };
     let mut state = WprsClientState::new(
         event_queue.handle(),

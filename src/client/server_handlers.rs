@@ -155,6 +155,7 @@ impl WprsClientState {
                 &self.qh,
                 &mut self.object_bimap,
                 &self.title_prefix,
+                &self.app_id_prefix,
             )
             .location(loc!())?,
             Some(wayland::Role::XdgPopup(_)) => RemoteXdgPopup::apply(

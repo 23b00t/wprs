@@ -50,6 +50,7 @@ pub struct RemoteXdgToplevel {
     pub title: Option<String>,
     pub title_prefix: String,
     pub app_id: Option<String>,
+    pub app_id_prefix: String,
     pub decoration_mode: Option<DecorationMode>,
     pub max_size: Size<i32>,
     pub min_size: Size<i32>,
@@ -65,6 +66,7 @@ impl RemoteXdgToplevel {
         qh: &QueueHandle<WprsClientState>,
         object_bimap: &mut ObjectBimap,
         title_prefix: &str,
+        app_id_prefix: &str,
     ) -> Result<()> {
         let local_surface = {
             let surface = surfaces.get_mut(&surface_id).location(loc!())?;
@@ -80,6 +82,9 @@ impl RemoteXdgToplevel {
         // Until the remote window sets a title (it may never do so).
         if !title_prefix.is_empty() {
             local_window.set_title(title_prefix.trim_end());
+        }
+        if !app_id_prefix.is_empty() {
+            local_window.set_app_id(app_id_prefix.trim_end());
         }
 
         {
@@ -130,6 +135,7 @@ impl RemoteXdgToplevel {
             title: None,
             title_prefix: title_prefix.to_owned(),
             app_id: None,
+            app_id_prefix: app_id_prefix.to_owned(),
             decoration_mode: None,
             max_size: (0, 0).into(),
             min_size: (0, 0).into(),
@@ -159,8 +165,15 @@ impl RemoteXdgToplevel {
     fn set_app_id(&mut self, app_id: Option<String>) {
         if self.app_id != app_id {
             self.app_id = app_id;
-            if let Some(app_id) = &self.app_id {
-                self.local_window.set_app_id(app_id);
+            match &self.app_id {
+                Some(app_id) => self
+                    .local_window
+                    .set_app_id(format!("{}{}", self.app_id_prefix, app_id)),
+                // Windows without an app id must still carry the prefix.
+                None if !self.app_id_prefix.is_empty() => {
+                    self.local_window.set_app_id(self.app_id_prefix.trim_end())
+                },
+                None => {},
             }
         }
     }
@@ -238,6 +251,7 @@ impl RemoteXdgToplevel {
         qh: &QueueHandle<WprsClientState>,
         object_bimap: &mut ObjectBimap,
         title_prefix: &str,
+        app_id_prefix: &str,
     ) -> Result<()> {
         Self::set_role(
             client_id,
@@ -248,6 +262,7 @@ impl RemoteXdgToplevel {
             qh,
             object_bimap,
             title_prefix,
+            app_id_prefix,
         )
         .location(loc!())?;
         let surface = surfaces.get_mut(&surface_id).location(loc!())?;

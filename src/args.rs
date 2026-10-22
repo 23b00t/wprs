@@ -237,6 +237,13 @@ pub fn title_prefix() -> impl Parser<Option<String>> {
         .optional()
 }
 
+pub fn app_id_prefix() -> impl Parser<Option<String>> {
+    bpaf::long("app-id-prefix")
+        .argument::<String>("STRING")
+        .help("Prefix window app ids with a string. Windows without an app id get the prefix alone, without trailing whitespace.")
+        .optional()
+}
+
 pub static LOG_PRIV_DATA: AtomicBool = AtomicBool::new(false);
 
 pub fn set_log_priv_data(val: bool) {
