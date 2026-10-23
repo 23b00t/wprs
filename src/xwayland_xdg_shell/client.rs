@@ -1309,6 +1309,10 @@ impl XWaylandXdgToplevel {
 
         let x11_surface = surface.get_x11_surface().location(loc!())?;
         local_window.set_title(x11_surface.title());
+        // The X11 class as app id from the start: property_notify only
+        // reports later changes, and a class set before mapping (the usual
+        // case) never reached the compositor
+        local_window.set_app_id(x11_surface.class());
 
         if let Some(max_size) = x11_surface.max_size() {
             local_window.set_max_size(Some((max_size.w as u32, max_size.h as u32)));
