@@ -199,11 +199,24 @@ impl fmt::Debug for CompressedBufferData {
     }
 }
 
+/// A granted buffer (xen_shm) of wprsd, announced by `Request::ShmBuffer`.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Archive, Deserialize, Serialize)]
+pub struct ShmSlot(pub u64);
+
+/// Pages of a new granted buffer for one surface (dom0 maps them read-only).
+#[derive(Debug, Clone, Eq, PartialEq, Archive, Deserialize, Serialize)]
+pub struct ShmBuffer {
+    pub id: ShmSlot,
+    pub refs: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, EnumAsInner, Archive, Deserialize, Serialize)]
 pub enum BufferData {
     External,
     Uncompressed(UncompressedBufferData),
     Compressed(CompressedBufferData),
+    /// The pixels are in this granted buffer, wprsc acks it after copying.
+    Shm(ShmSlot),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Archive, Deserialize, Serialize)]

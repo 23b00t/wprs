@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -62,6 +63,7 @@ use crate::serialization::ClientId;
 use crate::serialization::Event;
 use crate::serialization::ObjectId;
 use crate::serialization::Request;
+use crate::serialization::SendType;
 use crate::serialization::Serializer;
 use crate::serialization::geometry::Point;
 use crate::serialization::geometry::Rectangle;
@@ -75,8 +77,11 @@ use crate::serialization::wayland::UncompressedBufferData;
 use crate::serialization::wayland::ViewportState;
 use crate::serialization::wayland::WlSurfaceId;
 use crate::vec4u8::Vec4u8s;
+use crate::xen_shm;
+use crate::xen_shm::MappedBuffer;
 
 pub mod server_handlers;
+pub mod shm;
 pub mod smithay_handlers;
 mod subsurface;
 mod xdg_shell;
@@ -106,6 +111,8 @@ pub struct ClientOptions {
     pub title_prefix: String,
     pub app_id_prefix: String,
     pub deny_fullscreen: bool,
+    /// Map wprsd's granted buffers (xen_shm) through this broker socket.
+    pub xen_grant_socket: Option<PathBuf>,
 }
 
 pub struct WprsClientState {
@@ -152,6 +159,7 @@ pub struct WprsClientState {
     title_prefix: String,
     app_id_prefix: String,
     deny_fullscreen: bool,
+    pub shm: Option<shm::ShmClient>,
 
     buffer_cache: Option<UncompressedBufferData>,
 }
@@ -171,7 +179,7 @@ impl WprsClientState {
         let pool =
             SlotPool::new(3840 * 2160, &shm_state).context(loc!(), "failed to create pool")?;
 
-        Ok(Self {
+        let state = Self {
             qh: qh.clone(),
             conn,
             capabilities: Arc::new(OnceLock::new()),
@@ -222,8 +230,24 @@ impl WprsClientState {
             title_prefix: options.title_prefix,
             app_id_prefix: options.app_id_prefix,
             deny_fullscreen: options.deny_fullscreen,
+            shm: options.xen_grant_socket.and_then(|socket| {
+                shm::ShmClient::new(&socket)
+                    .context(
+                        loc!(),
+                        "can't map granted buffers, pixels come over the stream",
+                    )
+                    .warn(loc!())
+                    .ok()
+            }),
             buffer_cache: None,
-        })
+        };
+        if state.shm.is_some() {
+            state
+                .serializer
+                .writer()
+                .send(SendType::Object(Event::ShmSupported));
+        }
+        Ok(state)
     }
 }
 
@@ -255,6 +279,75 @@ impl RemoteBuffer {
             active_buffer,
             dirty: true,
         })
+    }
+
+    fn new_empty(metadata: BufferMetadata, pool: &mut SlotPool) -> Result<Self> {
+        let active_buffer = pool
+            .create_buffer(
+                metadata.width,
+                metadata.height,
+                metadata.stride,
+                metadata.format.into(),
+            )
+            .location(loc!())?
+            .0;
+        Ok(Self {
+            metadata,
+            data: Vec4u8s::new(),
+            active_buffer,
+            dirty: true,
+        })
+    }
+
+    /// Copies the damaged parts (None: everything) of a granted buffer.
+    fn copy_from(
+        &mut self,
+        src: &MappedBuffer,
+        mut damage: Option<&[Rectangle<i32>]>,
+        pool: &mut SlotPool,
+    ) -> Result<()> {
+        let canvas = match pool.canvas(&self.active_buffer) {
+            Some(canvas) => canvas,
+            None => {
+                // Still held by the compositor: a new buffer, all of it.
+                self.active_buffer = pool
+                    .create_buffer(
+                        self.metadata.width,
+                        self.metadata.height,
+                        self.metadata.stride,
+                        self.metadata.format.into(),
+                    )
+                    .location(loc!())?
+                    .0;
+                damage = None;
+                pool.canvas(&self.active_buffer).location(loc!())?
+            },
+        };
+        // The metadata comes from the VM: checked, without overflow
+        let len = xen_shm::image_len(
+            self.metadata.stride,
+            self.metadata.width,
+            self.metadata.height,
+        )
+        .ok_or_else(|| anyhow!("invalid buffer metadata {:?}", self.metadata))?;
+        if src.len() < len || canvas.len() < len {
+            bail!("granted buffer or canvas smaller than {len} bytes");
+        }
+        // SAFETY: both are at least image_len bytes (checked above).
+        unsafe {
+            xen_shm::copy_rects(
+                src.as_ptr(),
+                canvas.as_mut_ptr(),
+                self.metadata.stride as usize,
+                self.metadata.width,
+                self.metadata.height,
+                damage,
+            );
+        }
+        // The stream's copy is stale now.
+        self.data = Vec4u8s::new();
+        self.dirty = true;
+        Ok(())
     }
 
     fn update_data(&mut self, buffer: Buffer) {
@@ -467,6 +560,28 @@ impl RemoteSurface {
         Ok(())
     }
 
+    fn set_buffer_shm(
+        &mut self,
+        metadata: BufferMetadata,
+        src: &MappedBuffer,
+        damage: Option<&[Rectangle<i32>]>,
+        pool: &mut SlotPool,
+    ) -> Result<()> {
+        let mut damage = damage;
+        if self
+            .buffer
+            .as_ref()
+            .is_none_or(|buffer| buffer.metadata != metadata)
+        {
+            self.buffer = Some(RemoteBuffer::new_empty(metadata, pool).location(loc!())?);
+            damage = None;
+        }
+        self.buffer
+            .as_mut()
+            .location(loc!())?
+            .copy_from(src, damage, pool)
+    }
+
     #[instrument(skip(self), level = "debug")]
     fn clear_buffer(&mut self) {
         let wl_surface = self.wl_surface().clone();
@@ -474,14 +589,26 @@ impl RemoteSurface {
         wl_surface.attach(None, 0, 0);
     }
 
-    #[instrument(skip(self, pool), level = "debug")]
+    #[instrument(skip(self, pool, shm), level = "debug")]
     pub fn apply_buffer(
         &mut self,
         new_buffer: Option<BufferAssignment>,
         buffer_cache: &mut Option<UncompressedBufferData>,
         pool: &mut SlotPool,
+        shm: Option<&shm::ShmClient>,
+        damage: Option<&[Rectangle<i32>]>,
     ) -> Result<()> {
         match new_buffer {
+            Some(BufferAssignment::New(Buffer {
+                metadata,
+                data: BufferData::Shm(id),
+            })) => {
+                let src = shm
+                    .and_then(|shm| shm.get(id))
+                    .ok_or_else(|| anyhow!("unknown granted buffer {id:?}"))?;
+                self.set_buffer_shm(metadata, src, damage, pool)
+                    .location(loc!())?;
+            },
             Some(BufferAssignment::New(mut new_buffer)) => {
                 if !new_buffer.data.is_external() {
                     return Err(anyhow!(

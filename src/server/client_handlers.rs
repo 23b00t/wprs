@@ -19,7 +19,9 @@ use std::fs::File;
 use std::io::Read;
 use std::io::Write;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
+use std::sync::Arc;
 use std::thread;
 
 use nix::fcntl::OFlag;
@@ -57,6 +59,9 @@ use crate::serialization::Event;
 use crate::serialization::RecvType;
 use crate::serialization::Request;
 use crate::serialization::SendType;
+use crate::serialization::wayland::BufferAssignment;
+use crate::serialization::wayland::BufferData;
+use crate::serialization::wayland::CompressedBufferData;
 use crate::serialization::wayland::DataDestinationEvent;
 use crate::serialization::wayland::DataEvent;
 use crate::serialization::wayland::DataRequest;
@@ -81,7 +86,9 @@ use crate::serialization::xdg_shell::ToplevelConfigure;
 use crate::serialization::xdg_shell::ToplevelEvent;
 use crate::server::LockedSurfaceState;
 use crate::server::WprsServerState;
+use crate::server::shm;
 use crate::server::smithay_handlers::DndGrab;
+use crate::sharding_compression::ShardingCompressor;
 
 enum UnknownSurfaceErr {
     ObjectId(WlSurfaceId),
@@ -656,9 +663,29 @@ impl WprsServerState {
     }
 
     #[instrument(skip_all, level = "debug")]
+    fn handle_shm_supported(&mut self) -> Result<()> {
+        let Some(socket) = &self.xen_grant_socket else {
+            return Ok(());
+        };
+        match shm::ShmServer::new(self.shm_epoch, socket) {
+            Ok(shm) => {
+                info!("wprsc maps granted buffers, sending pixels through them");
+                self.shm = Some(shm);
+            },
+            Err(e) => info!("wprsc could map granted buffers, but we can't grant: {e:?}"),
+        }
+        Ok(())
+    }
+
+    #[instrument(skip_all, level = "debug")]
     fn handle_connect(&mut self) -> Result<()> {
         // TODO: sync client outputs
         self.serializer.set_other_end_connected(true);
+        // A new wprsc: no buffers mapped yet, it says again whether it can.
+        self.shm = None;
+        self.shm_epoch += 1;
+        let mut compressor =
+            ShardingCompressor::new(NonZeroUsize::new(16).unwrap(), 1).location(loc!())?;
 
         self.serializer
             .writer()
@@ -667,7 +694,7 @@ impl WprsServerState {
             })));
 
         self.for_each_surface(|_, surface_data| {
-            let surface_state = surface_data
+            let mut surface_state = surface_data
                 .data_map
                 .get::<LockedSurfaceState>()
                 .unwrap()
@@ -675,6 +702,18 @@ impl WprsServerState {
                 .lock()
                 .unwrap()
                 .clone();
+
+            // Pixels in a granted buffer: send its contents over the stream.
+            if let Some(BufferAssignment::New(buffer)) = &mut surface_state.buffer
+                && buffer.data.is_shm()
+            {
+                match shm::latest_frame(surface_data, &mut compressor) {
+                    Some(shards) => {
+                        buffer.data = BufferData::Compressed(CompressedBufferData(Arc::new(shards)))
+                    },
+                    None => surface_state.buffer = None,
+                }
+            }
 
             let mut surface_state_to_send = surface_state.clone_without_buffer();
 
@@ -1023,6 +1062,18 @@ impl WprsServerState {
             RecvType::Object(Event::Data(data_event)) => self.handle_data_event(data_event),
             RecvType::Object(Event::Surface(surface_event)) => {
                 self.handle_surface_event(surface_event)
+            },
+            RecvType::Object(Event::ShmSupported) => self.handle_shm_supported(),
+            RecvType::Object(Event::ShmFailed) => {
+                warn!("wprsc can't map our granted buffers, back to the stream");
+                self.shm = None;
+                Ok(())
+            },
+            RecvType::Object(Event::ShmAck(id)) => {
+                if let Some(shm) = &self.shm {
+                    shm.ack(id);
+                }
+                Ok(())
             },
             RecvType::RawBuffer(_) => unreachable!(),
         }

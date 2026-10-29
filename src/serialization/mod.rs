@@ -123,6 +123,10 @@ pub enum Request {
     Data(wayland::DataRequest),
     ClientDisconnected(ClientId),
     Capabilities(Capabilities),
+    /// A new granted buffer (xen_shm), before the commit that uses it.
+    ShmBuffer(wayland::ShmBuffer),
+    /// The granted buffer is gone, wprsc unmaps it.
+    ShmRelease(wayland::ShmSlot),
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Deserialize, Serialize)]
@@ -135,6 +139,12 @@ pub enum Event {
     Popup(xdg_shell::PopupEvent),
     Data(wayland::DataEvent),
     Surface(wayland::SurfaceEvent),
+    /// wprsc can map granted buffers (xen_shm), sent after WprsClientConnect.
+    ShmSupported,
+    /// wprsc has copied the granted buffer, wprsd may write it again.
+    ShmAck(wayland::ShmSlot),
+    /// wprsc couldn't map a granted buffer: wprsd goes back to the stream.
+    ShmFailed,
 }
 
 // TODO: test that object ids with same value from different clients hash

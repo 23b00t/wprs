@@ -220,6 +220,14 @@ pub fn log_file() -> impl Parser<Option<Option<PathBuf>>> {
         .map(|log_file| log_file.map(Some))
 }
 
+pub fn xen_grant_socket() -> impl Parser<Option<Option<PathBuf>>> {
+    bpaf::long("xen-grant-socket")
+        .argument::<PathBuf>("PATH")
+        .help("Pixels over Xen grant-shared memory instead of the stream (wprsd in a guest, wprsc in dom0, needs the xen feature): the grant broker's socket of this side (nox-relay's `grants` rule). Falls back to the stream if the other side can't.")
+        .optional()
+        .map(|path| path.map(Some))
+}
+
 pub fn framerate() -> impl Parser<Option<u32>> {
     bpaf::long("framerate").argument::<u32>("FPS").optional()
 }

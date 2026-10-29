@@ -58,6 +58,8 @@ pub struct WprscConfig {
     pub title_prefix: String,
     pub app_id_prefix: String,
     pub deny_fullscreen: bool,
+    #[optional_wrap]
+    pub xen_grant_socket: Option<PathBuf>,
 }
 
 impl Default for WprscConfig {
@@ -74,6 +76,7 @@ impl Default for WprscConfig {
             title_prefix: String::new(),
             app_id_prefix: String::new(),
             deny_fullscreen: false,
+            xen_grant_socket: None,
         }
     }
 }
@@ -104,6 +107,7 @@ impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
         let title_prefix = args::title_prefix();
         let app_id_prefix = args::app_id_prefix();
         let deny_fullscreen = deny_fullscreen();
+        let xen_grant_socket = args::xen_grant_socket();
         bpaf::construct!(Self {
             print_default_config_and_exit,
             config_file,
@@ -116,6 +120,7 @@ impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
             title_prefix,
             app_id_prefix,
             deny_fullscreen,
+            xen_grant_socket,
         })
         .to_options()
         .run()
@@ -168,6 +173,7 @@ fn main() -> Result<()> {
         title_prefix: config.title_prefix,
         app_id_prefix: config.app_id_prefix,
         deny_fullscreen: config.deny_fullscreen,
+        xen_grant_socket: config.xen_grant_socket,
     };
     let mut state = WprsClientState::new(
         event_queue.handle(),

@@ -104,7 +104,9 @@ use crate::compositor_utils;
 use crate::prelude::*;
 use crate::serialization;
 use crate::serialization::tuple::Tuple2;
+use crate::serialization::wayland::Buffer;
 use crate::serialization::wayland::BufferAssignment;
+use crate::serialization::wayland::BufferData;
 use crate::serialization::wayland::ClientSurface;
 use crate::serialization::wayland::CursorImage;
 use crate::serialization::wayland::CursorImageStatus;
@@ -140,6 +142,10 @@ use crate::server::WprsServerState;
 /// Frame callbacks wait while more messages than this are queued for the
 /// client (see the frame timer below).
 const MAX_QUEUED_FOR_FRAME: usize = 4;
+
+/// Frame timer polls a callback waits at most for wprsc's ack of the next
+/// granted buffer (xen_shm); a lost ack must not stop the app.
+const MAX_SHM_HELD: u32 = 8;
 
 impl BufferHandler for WprsServerState {
     #[instrument(skip(self), level = "debug")]
@@ -745,6 +751,31 @@ pub fn set_xdg_toplevel_attributes(
     Ok(())
 }
 
+/// The surface's damage in buffer coordinates.
+fn buffer_damage(
+    damage: &[Damage],
+    surface_state: &SurfaceState,
+    buffer_size: Option<(i32, i32)>,
+) -> Vec<serialization::geometry::Rectangle<i32>> {
+    damage
+        .iter()
+        .map(|damage| match damage {
+            Damage::Buffer(rect) => *rect,
+            Damage::Surface(rect) => compositor_utils::surface_damage_to_buffer(
+                *rect,
+                surface_state.buffer_scale,
+                surface_state
+                    .buffer_transform
+                    .unwrap_or(Transform::Normal)
+                    .into(),
+                surface_state.viewport_state.as_ref(),
+                buffer_size,
+            ),
+        })
+        .map(Into::into)
+        .collect()
+}
+
 #[allow(clippy::iter_with_drain)]
 #[instrument(skip(state), level = "debug")]
 pub fn commit_impl(
@@ -797,6 +828,7 @@ pub fn commit_impl(
 
     if !frame_callbacks.is_empty() {
         let surface = surface.clone();
+        let mut shm_held = 0;
         state
             .lh
             .insert_source(
@@ -817,8 +849,18 @@ pub fn commit_impl(
                     // previous frames, hold the callback, so the app draws
                     // at the rate the link sustains instead of filling an
                     // unbounded queue (wprsd OOM-killed during video).
+                    // Same for a granted buffer wprsc hasn't acked yet, but
+                    // not forever.
+                    let shm_busy = shm_held < MAX_SHM_HELD
+                        && state.shm.as_ref().is_some_and(|shm| {
+                            compositor::with_states(&surface, |data| shm.next_busy(data))
+                        });
+                    if shm_busy {
+                        shm_held += 1;
+                    }
                     if state.serializer.other_end_connected()
                         && state.serializer.queued() <= MAX_QUEUED_FOR_FRAME
+                        && !shm_busy
                     {
                         // We can't use into_iter() because we can't move
                         // frame_callbacks because this is a FnMut. However, this
@@ -871,20 +913,47 @@ pub fn commit_impl(
     debug!("buffer assignment: {:?}", &surface_attributes.buffer);
     match &surface_attributes.buffer {
         Some(SmithayBufferAssignment::NewBuffer(buffer)) if !skip_buffer => {
-            compositor_utils::with_buffer_contents(buffer, |data, spec| {
-                surface_state.set_buffer(&spec, data, &mut state.compressor)
-            })
-            .location(loc!())?
-            .location(loc!())?;
+            // Into the next granted buffer if wprsc maps them (xen_shm).
+            let (shm_requests, shm_slot) = match &mut state.shm {
+                Some(shm) => compositor_utils::with_buffer_contents(buffer, |data, spec| {
+                    let damage = buffer_damage(
+                        &surface_attributes.damage,
+                        surface_state,
+                        Some((spec.width, spec.height)),
+                    );
+                    shm.commit(surface_data, &spec, data, &damage)
+                })
+                .location(loc!())?
+                .location(loc!())?,
+                None => (Vec::new(), None),
+            };
+            for request in shm_requests {
+                state.serializer.writer().send(SendType::Object(request));
+            }
 
-            let raw_buffer_to_send = surface_state_to_send
-                .update_with_external_buffer(&surface_state.buffer)
+            if let Some((metadata, slot)) = shm_slot {
+                let buffer = BufferAssignment::New(Buffer {
+                    metadata,
+                    data: BufferData::Shm(slot),
+                });
+                surface_state.buffer = Some(buffer.clone());
+                surface_state_to_send.buffer = Some(buffer);
+            } else {
+                compositor_utils::with_buffer_contents(buffer, |data, spec| {
+                    surface_state.set_buffer(&spec, data, &mut state.compressor)
+                })
+                .location(loc!())?
                 .location(loc!())?;
 
-            state
-                .serializer
-                .writer()
-                .send(SendType::RawBuffer(raw_buffer_to_send));
+                let raw_buffer_to_send = surface_state_to_send
+                    .update_with_external_buffer(&surface_state.buffer)
+                    .location(loc!())?;
+
+                state
+                    .serializer
+                    .writer()
+                    .send(SendType::RawBuffer(raw_buffer_to_send));
+            }
         },
         Some(SmithayBufferAssignment::Removed) => {
             surface_state.buffer = None;
@@ -905,23 +974,11 @@ pub fn commit_impl(
         .as_ref()
         .and_then(BufferAssignment::as_new)
         .map(|buffer| (buffer.metadata.width, buffer.metadata.height));
-    let damage = mem::take(&mut surface_attributes.damage)
-        .iter()
-        .map(|damage| match damage {
-            Damage::Buffer(rect) => *rect,
-            Damage::Surface(rect) => compositor_utils::surface_damage_to_buffer(
-                *rect,
-                surface_state.buffer_scale,
-                surface_state
-                    .buffer_transform
-                    .unwrap_or(Transform::Normal)
-                    .into(),
-                surface_state.viewport_state.as_ref(),
-                buffer_size,
-            ),
-        })
-        .map(Into::into)
-        .collect();
+    let damage = buffer_damage(
+        &mem::take(&mut surface_attributes.damage),
+        surface_state,
+        buffer_size,
+    );
     surface_state_to_send.damage = Some(damage);
 
     state

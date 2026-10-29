@@ -73,6 +73,9 @@ tracy = ["dep:tracy-client", "dep:tracing-tracy"]
 # Enables memory allocation tracking for tracy. NOTE: severely decreases
 # allocation performance.
 tracy-allocator = ["tracy"]
+# Pixels over Xen grant-shared memory instead of the stream (wprsd in a domU,
+# wprsc in dom0, src/xen_shm.rs).
+xen = ["nix/mman", "nix/uio"]
 
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }

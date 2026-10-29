@@ -39,6 +39,7 @@ use crate::serialization::Request;
 use crate::serialization::SendType;
 use crate::serialization::tuple::Tuple2;
 use crate::serialization::wayland;
+use crate::serialization::wayland::BufferAssignment;
 use crate::serialization::wayland::ClientSurface;
 use crate::serialization::wayland::CursorImage;
 use crate::serialization::wayland::CursorImageStatus;
@@ -48,6 +49,7 @@ use crate::serialization::wayland::DataRequest;
 use crate::serialization::wayland::DataSource;
 use crate::serialization::wayland::DataSourceRequest;
 use crate::serialization::wayland::DataToTransfer;
+use crate::serialization::wayland::ShmBuffer;
 use crate::serialization::wayland::SurfaceRequest;
 use crate::serialization::wayland::SurfaceRequestPayload;
 use crate::serialization::wayland::SurfaceState;
@@ -84,13 +86,25 @@ impl WprsClientState {
                 })
                 .location(loc!())?;
 
-            remote_surface
-                .apply_buffer(
-                    surface_state.buffer.take(),
-                    &mut self.buffer_cache,
-                    &mut self.pool,
-                )
-                .location(loc!())?;
+            // A granted buffer is acked even if copying it failed, so wprsd
+            // doesn't wait for it.
+            let shm_ack = match &surface_state.buffer {
+                Some(BufferAssignment::New(buffer)) => buffer.data.as_shm().copied(),
+                _ => None,
+            };
+            let applied = remote_surface.apply_buffer(
+                surface_state.buffer.take(),
+                &mut self.buffer_cache,
+                &mut self.pool,
+                self.shm.as_ref(),
+                surface_state.damage.as_deref(),
+            );
+            if let Some(id) = shm_ack {
+                self.serializer
+                    .writer()
+                    .send(SendType::Object(Event::ShmAck(id)));
+            }
+            applied.location(loc!())?;
 
             remote_surface.set_transformation(
                 surface_state.buffer_scale,
@@ -583,6 +597,22 @@ impl WprsClientState {
     }
 
     #[instrument(skip_all, level = "debug")]
+    fn handle_shm_buffer(&mut self, buffer: ShmBuffer) -> Result<()> {
+        let Some(shm) = &mut self.shm else {
+            return Ok(());
+        };
+        if let Err(e) = shm.add(buffer) {
+            // Back to the stream for good (this connection).
+            self.shm = None;
+            self.serializer
+                .writer()
+                .send(SendType::Object(Event::ShmFailed));
+            return Err(e).location(loc!());
+        }
+        Ok(())
+    }
+
+    #[instrument(skip_all, level = "debug")]
     fn handle_buffer(&mut self, buffer: Vec<u8>) -> Result<()> {
         self.buffer_cache = Some(UncompressedBufferData(buffer.into()));
         Ok(())
@@ -602,6 +632,13 @@ impl WprsClientState {
                 self.handle_client_disconnected(client)
             },
             RecvType::Object(Request::Capabilities(caps)) => self.handle_capabilities(caps),
+            RecvType::Object(Request::ShmBuffer(buffer)) => self.handle_shm_buffer(buffer),
+            RecvType::Object(Request::ShmRelease(id)) => {
+                if let Some(shm) = &mut self.shm {
+                    shm.release(id);
+                }
+                Ok(())
+            },
             RecvType::RawBuffer(buffer) => self.handle_buffer(buffer),
         }
         .log_and_ignore(loc!())

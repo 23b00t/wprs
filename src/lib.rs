@@ -31,6 +31,7 @@ pub mod sharding_compression;
 pub mod simd;
 pub mod utils;
 pub mod vec4u8;
+pub mod xen_shm;
 pub mod xwayland_xdg_shell;
 
 #[cfg(feature = "tracy-allocator")]

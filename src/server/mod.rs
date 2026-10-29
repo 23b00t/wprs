@@ -57,6 +57,7 @@ use crate::sharding_compression::ShardingCompressor;
 use crate::utils::SerialMap;
 
 pub mod client_handlers;
+pub mod shm;
 pub mod smithay_handlers;
 
 struct LockedSurfaceState(Mutex<SurfaceState>);
@@ -80,6 +81,12 @@ fn surface_destruction_callback(state: &mut WprsServerState, surface: &WlSurface
         })));
 
         state.object_map.remove(&surface_state.id);
+
+        if let Some(shm) = &state.shm {
+            for request in shm.destroyed(surface_data) {
+                writer.send(SendType::Object(request));
+            }
+        }
     });
 }
 
@@ -108,6 +115,12 @@ pub struct WprsServerState {
 
     pub serializer: Serializer<Request, Event>,
     pub compressor: ShardingCompressor,
+    /// Pixels over granted buffers (xen_shm), once wprsc said it can map them.
+    pub shm: Option<shm::ShmServer>,
+    /// Counts wprsc connections, buffers of an earlier one are stale.
+    pub shm_epoch: u64,
+    /// The guest's grant broker (nox-relay), None: pixels over the stream.
+    pub xen_grant_socket: Option<std::path::PathBuf>,
     /// Reverse map from WlSurfaceId, which is the hash of ObjectId, back to its
     /// source ObjectId. We can't put this in SurfaceState because is
     /// serializable, while this only has meaning locally. We need this for
@@ -172,6 +185,9 @@ impl WprsServerState {
             serializer,
             // TODO: try tuning this based on the number of cpus the machine has.
             compressor: ShardingCompressor::new(NonZeroUsize::new(16).unwrap(), 1).unwrap(),
+            shm: None,
+            shm_epoch: 0,
+            xen_grant_socket: None,
             object_map: HashMap::new(),
             outputs: HashMap::new(),
             serial_map: SerialMap::new(),

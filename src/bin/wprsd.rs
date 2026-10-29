@@ -65,6 +65,8 @@ pub struct WprsdConfig {
     xwayland_xdg_shell_args: Vec<String>,
     kde_server_side_decorations: bool,
     selection_sync: bool,
+    #[optional_wrap]
+    xen_grant_socket: Option<PathBuf>,
 }
 
 impl Default for WprsdConfig {
@@ -85,6 +87,7 @@ impl Default for WprsdConfig {
             xwayland_xdg_shell_args: Vec::new(),
             kde_server_side_decorations: false,
             selection_sync: true,
+            xen_grant_socket: None,
         }
     }
 }
@@ -153,6 +156,7 @@ impl OptionalConfig<WprsdConfig> for OptionalWprsdConfig {
         let xwayland_xdg_shell_args = xwayland_xdg_shell_args();
         let kde_server_side_decorations = kde_server_side_decorations();
         let selection_sync = selection_sync();
+        let xen_grant_socket = args::xen_grant_socket();
         bpaf::construct!(Self {
             print_default_config_and_exit,
             config_file,
@@ -169,6 +173,7 @@ impl OptionalConfig<WprsdConfig> for OptionalWprsdConfig {
             xwayland_xdg_shell_args,
             kde_server_side_decorations,
             selection_sync,
+            xen_grant_socket,
         })
         .to_options()
         .run()
@@ -274,6 +279,7 @@ pub fn main() -> Result<()> {
         config.kde_server_side_decorations,
         config.selection_sync,
     );
+    state.xen_grant_socket = config.xen_grant_socket.clone();
 
     init_wayland_listener(&config.wayland_display, display, &mut state, &event_loop)
         .location(loc!())?;
