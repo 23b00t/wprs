@@ -29,6 +29,7 @@ use smithay::xwayland::xwm::Reorder;
 use smithay::xwayland::xwm::ResizeEdge as X11ResizeEdge;
 use smithay::xwayland::xwm::WmWindowProperty;
 use smithay::xwayland::xwm::XwmId;
+use smithay_client_toolkit::shell::WaylandSurface;
 
 use crate::prelude::*;
 use crate::xwayland_xdg_shell::WprsState;
@@ -357,6 +358,9 @@ impl XwmHandler for WprsState {
     }
 
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        // wprsd forwards title and app id with the next commit of the
+        // surface; an X11 window that changes them without drawing (e.g. a
+        // class set after mapping) would keep the old ones, so commit here.
         match property {
             WmWindowProperty::Title => {
                 if let Some(xwayland_surface) =
@@ -364,6 +368,7 @@ impl XwmHandler for WprsState {
                     && let Some(Role::XdgToplevel(toplevel)) = &xwayland_surface.role
                 {
                     toplevel.local_window.set_title(window.title());
+                    toplevel.local_window.commit();
                 }
             },
             WmWindowProperty::Class => {
@@ -372,6 +377,7 @@ impl XwmHandler for WprsState {
                     && let Some(Role::XdgToplevel(toplevel)) = &xwayland_surface.role
                 {
                     toplevel.local_window.set_app_id(window.class());
+                    toplevel.local_window.commit();
                 }
             },
             _ => {},
