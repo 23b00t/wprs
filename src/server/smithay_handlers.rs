@@ -143,6 +143,77 @@ use crate::server::WprsServerState;
 /// client (see the frame timer below).
 const MAX_QUEUED_FOR_FRAME: usize = 4;
 
+/// Sends the newest frame of a surface whose frames were held back while the
+/// queue to wprsc was full, once it has drained (see commit_impl). Frames are
+/// compressed whole, so the frames in between can be dropped.
+fn schedule_deferred_frame(state: &mut WprsServerState, surface: WlSurface) {
+    state
+        .lh
+        .insert_source(
+            Timer::from_duration(state.frame_interval),
+            move |_, _, state| {
+                if !state.deferred_frames.contains(&surface.id()) {
+                    // sent with a later commit in the meantime
+                    return TimeoutAction::Drop;
+                }
+                if !surface.is_alive() || !state.serializer.other_end_connected() {
+                    // a reconnecting wprsc gets every surface anyway
+                    state.deferred_frames.remove(&surface.id());
+                    return TimeoutAction::Drop;
+                }
+                if state.serializer.queued() > MAX_QUEUED_FOR_FRAME {
+                    return TimeoutAction::ToDuration(state.frame_interval);
+                }
+                state.deferred_frames.remove(&surface.id());
+                send_latest_frame(state, &surface).log_and_ignore(loc!());
+                TimeoutAction::Drop
+            },
+        )
+        .expect("timer registration should never fail");
+}
+
+fn send_latest_frame(state: &mut WprsServerState, surface: &WlSurface) -> Result<()> {
+    compositor::with_states(surface, |surface_data| {
+        let surface_state = surface_data
+            .data_map
+            .get::<LockedSurfaceState>()
+            .location(loc!())?
+            .0
+            .lock()
+            .unwrap();
+        let Some(BufferAssignment::New(buffer)) = &surface_state.buffer else {
+            return Ok(());
+        };
+        if !buffer.data.is_compressed() {
+            return Ok(());
+        }
+        let (width, height) = (buffer.metadata.width, buffer.metadata.height);
+        let mut surface_state_to_send = surface_state.clone_without_buffer();
+        let raw_buffer_to_send = surface_state_to_send
+            .update_with_external_buffer(&surface_state.buffer)
+            .location(loc!())?;
+        // The frames in between sent no damage: redraw everything.
+        surface_state_to_send.damage = Some(vec![serialization::geometry::Rectangle::new(
+            0, 0, width, height,
+        )]);
+        state
+            .serializer
+            .writer()
+            .send(SendType::RawBuffer(raw_buffer_to_send));
+        state
+            .serializer
+            .writer()
+            .send(SendType::Object(Request::Surface(
+                SurfaceRequest::new(
+                    surface,
+                    SurfaceRequestPayload::Commit(surface_state_to_send),
+                )
+                .location(loc!())?,
+            )));
+        Ok(())
+    })
+}
+
 /// Frame timer polls a callback waits at most for wprsc's ack of the next
 /// granted buffer (xen_shm); a lost ack must not stop the app.
 const MAX_SHM_HELD: u32 = 8;
@@ -908,6 +979,8 @@ pub fn commit_impl(
     // This needs to be a clone_without_buffer, the extra copy of the buffer
     // data arc will cause a deadlock otherwise.
     let mut surface_state_to_send = surface_state.clone_without_buffer();
+    // Frame held back (queue to wprsc full): commit without buffer and damage.
+    let mut deferred = false;
 
     // TODO: make a function and dedupe with compositor.rs.
     debug!("buffer assignment: {:?}", &surface_attributes.buffer);
@@ -945,17 +1018,33 @@ pub fn commit_impl(
                 .location(loc!())?
                 .location(loc!())?;
 
-                let raw_buffer_to_send = surface_state_to_send
-                    .update_with_external_buffer(&surface_state.buffer)
-                    .location(loc!())?;
+                // Back pressure: the frame callbacks alone don't stop apps
+                // (Firefox draws on with its own timer, video has its own
+                // clock), so while wprsc doesn't take the frames, keep only the
+                // newest one per surface instead of queueing every frame
+                // (wprsd grew ~120 MB/s with wprsc stalled, OOM-killed).
+                if state.serializer.other_end_connected()
+                    && state.serializer.queued() > MAX_QUEUED_FOR_FRAME
+                {
+                    deferred = true;
+                    if state.deferred_frames.insert(surface.id()) {
+                        schedule_deferred_frame(state, surface.clone());
+                    }
+                } else {
+                    state.deferred_frames.remove(&surface.id());
+                    let raw_buffer_to_send = surface_state_to_send
+                        .update_with_external_buffer(&surface_state.buffer)
+                        .location(loc!())?;
 
-                state
-                    .serializer
-                    .writer()
-                    .send(SendType::RawBuffer(raw_buffer_to_send));
+                    state
+                        .serializer
+                        .writer()
+                        .send(SendType::RawBuffer(raw_buffer_to_send));
+                }
             }
         },
         Some(SmithayBufferAssignment::Removed) => {
+            state.deferred_frames.remove(&surface.id());
             surface_state.buffer = None;
             surface_state_to_send.buffer = Some(BufferAssignment::Removed);
         },
@@ -979,7 +1068,9 @@ pub fn commit_impl(
         surface_state,
         buffer_size,
     );
-    surface_state_to_send.damage = Some(damage);
+    if !deferred {
+        surface_state_to_send.damage = Some(damage);
+    }
 
     state
         .serializer

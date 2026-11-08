@@ -121,6 +121,9 @@ pub struct WprsServerState {
     pub shm_epoch: u64,
     /// The guest's grant broker (nox-relay), None: pixels over the stream.
     pub xen_grant_socket: Option<std::path::PathBuf>,
+    /// Surfaces whose newest frame wasn't sent because the queue to wprsc was
+    /// full; a timer sends it once the queue drains (back pressure).
+    pub deferred_frames: HashSet<ObjectId>,
     /// Reverse map from WlSurfaceId, which is the hash of ObjectId, back to its
     /// source ObjectId. We can't put this in SurfaceState because is
     /// serializable, while this only has meaning locally. We need this for
@@ -188,6 +191,7 @@ impl WprsServerState {
             shm: None,
             shm_epoch: 0,
             xen_grant_socket: None,
+            deferred_frames: HashSet::new(),
             object_map: HashMap::new(),
             outputs: HashMap::new(),
             serial_map: SerialMap::new(),
