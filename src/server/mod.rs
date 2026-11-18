@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::os::fd::OwnedFd;
+#[cfg(feature = "xen")]
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
@@ -57,6 +59,7 @@ use crate::sharding_compression::ShardingCompressor;
 use crate::utils::SerialMap;
 
 pub mod client_handlers;
+#[cfg(feature = "xen")]
 pub mod shm;
 pub mod smithay_handlers;
 
@@ -82,6 +85,7 @@ fn surface_destruction_callback(state: &mut WprsServerState, surface: &WlSurface
 
         state.object_map.remove(&surface_state.id);
 
+        #[cfg(feature = "xen")]
         if let Some(shm) = &state.shm {
             for request in shm.destroyed(surface_data) {
                 writer.send(SendType::Object(request));
@@ -116,11 +120,14 @@ pub struct WprsServerState {
     pub serializer: Serializer<Request, Event>,
     pub compressor: ShardingCompressor,
     /// Pixels over granted buffers (xen_shm), once wprsc said it can map them.
+    #[cfg(feature = "xen")]
     pub shm: Option<shm::ShmServer>,
     /// Counts wprsc connections, buffers of an earlier one are stale.
+    #[cfg(feature = "xen")]
     pub shm_epoch: u64,
-    /// The guest's grant broker (nox-relay), None: pixels over the stream.
-    pub xen_grant_socket: Option<std::path::PathBuf>,
+    /// The broker socket for granting buffers, None: pixels over the stream.
+    #[cfg(feature = "xen")]
+    pub xen_grant_socket: Option<PathBuf>,
     /// Surfaces whose newest frame wasn't sent because the queue to wprsc was
     /// full; a timer sends it once the queue drains (back pressure).
     pub deferred_frames: HashSet<ObjectId>,
@@ -153,6 +160,8 @@ impl WprsServerState {
         frame_interval: Duration,
         kde_server_side_decorations: bool,
         selection_sync: bool,
+        data_control: bool,
+        #[cfg(feature = "xen")] xen_grant_socket: Option<PathBuf>,
     ) -> Self {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(&dh, "wprs");
@@ -162,10 +171,11 @@ impl WprsServerState {
             KdeDecorationMode::Client
         };
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
-        // Lets local clients (e.g. wl-copy/wl-paste) use the selections without
-        // a window, which matters most when they aren't synced to the client.
+        // The global is only visible to clients if data_control is set.
         let data_control_state =
-            DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_| true);
+            DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), move |_| {
+                data_control
+            });
 
         Self {
             dh: dh.clone(),
@@ -188,9 +198,12 @@ impl WprsServerState {
             serializer,
             // TODO: try tuning this based on the number of cpus the machine has.
             compressor: ShardingCompressor::new(NonZeroUsize::new(16).unwrap(), 1).unwrap(),
+            #[cfg(feature = "xen")]
             shm: None,
+            #[cfg(feature = "xen")]
             shm_epoch: 0,
-            xen_grant_socket: None,
+            #[cfg(feature = "xen")]
+            xen_grant_socket,
             deferred_frames: HashSet::new(),
             object_map: HashMap::new(),
             outputs: HashMap::new(),

@@ -27,6 +27,11 @@ The launcher (`wprs`) requires:
 * psutil (python3-psutil on debian)
 * ssh client
 
+With `--features xen`, `wprsd` in a Xen guest and `wprsc` in dom0 can exchange
+window pixels through grant-shared memory instead of the stream
+(`--xen-grant-socket`, the socket of a grant broker on each side). The stream is
+used whenever the other side doesn't support it.
+
 ## Packaging
 
 We officially maintain [deb](#debian) instructions for Debian-based distros.
@@ -189,7 +194,9 @@ wprsc will execute the appropriate dance with the local compositor.
 Frame callbacks are scheduled locally by wprsd at the configured framerate, they
 are not forwarded from wprsc as that would introduce an unacceptable amount of
 frame latency due to network round-trips. When no wprsc is connected, wprsd
-pauses sending frame callbacks to wayland applications.
+pauses sending frame callbacks to wayland applications. Likewise, wprsd holds
+back frame callbacks while too many messages are queued for wprsc, and keeps
+only the newest frame of a surface until the queue has drained.
 
 Buffer compression is handled using a custom multithreaded and SIMD-accelerated
 lossless image compression algorithm:

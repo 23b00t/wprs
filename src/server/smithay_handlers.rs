@@ -104,8 +104,10 @@ use crate::compositor_utils;
 use crate::prelude::*;
 use crate::serialization;
 use crate::serialization::tuple::Tuple2;
+#[cfg(feature = "xen")]
 use crate::serialization::wayland::Buffer;
 use crate::serialization::wayland::BufferAssignment;
+#[cfg(feature = "xen")]
 use crate::serialization::wayland::BufferData;
 use crate::serialization::wayland::ClientSurface;
 use crate::serialization::wayland::CursorImage;
@@ -139,13 +141,30 @@ use crate::serialization::SendType;
 use crate::server::LockedSurfaceState;
 use crate::server::WprsServerState;
 
-/// Frame callbacks wait while more messages than this are queued for the
-/// client (see the frame timer below).
+/// Frame callbacks wait, and only the newest frame per surface is kept, while
+/// more messages than this are queued for the client.
 const MAX_QUEUED_FOR_FRAME: usize = 4;
 
+/// Whether too many messages wait for the client to take new frames.
+fn queue_full(queued: usize) -> bool {
+    queued > MAX_QUEUED_FOR_FRAME
+}
+
+/// Whether the frame callbacks of a surface may be sent: the client is
+/// connected, takes frames, and (xen_shm) its next granted buffer is free.
+fn frame_callback_ready(connected: bool, queued: usize, shm_busy: bool) -> bool {
+    connected && !queue_full(queued) && !shm_busy
+}
+
+/// Whether a new frame is held back for later instead of queued.
+fn defer_frame(connected: bool, queued: usize) -> bool {
+    connected && queue_full(queued)
+}
+
 /// Sends the newest frame of a surface whose frames were held back while the
-/// queue to wprsc was full, once it has drained (see commit_impl). Frames are
+/// queue was full, once it has drained (see commit_impl). Frames are
 /// compressed whole, so the frames in between can be dropped.
+#[instrument(skip_all, level = "debug")]
 fn schedule_deferred_frame(state: &mut WprsServerState, surface: WlSurface) {
     state
         .lh
@@ -161,7 +180,7 @@ fn schedule_deferred_frame(state: &mut WprsServerState, surface: WlSurface) {
                     state.deferred_frames.remove(&surface.id());
                     return TimeoutAction::Drop;
                 }
-                if state.serializer.queued() > MAX_QUEUED_FOR_FRAME {
+                if queue_full(state.serializer.queued()) {
                     return TimeoutAction::ToDuration(state.frame_interval);
                 }
                 state.deferred_frames.remove(&surface.id());
@@ -172,6 +191,7 @@ fn schedule_deferred_frame(state: &mut WprsServerState, surface: WlSurface) {
         .expect("timer registration should never fail");
 }
 
+#[instrument(skip_all, level = "debug")]
 fn send_latest_frame(state: &mut WprsServerState, surface: &WlSurface) -> Result<()> {
     compositor::with_states(surface, |surface_data| {
         let surface_state = surface_data
@@ -214,8 +234,9 @@ fn send_latest_frame(state: &mut WprsServerState, surface: &WlSurface) -> Result
     })
 }
 
-/// Frame timer polls a callback waits at most for wprsc's ack of the next
-/// granted buffer (xen_shm); a lost ack must not stop the app.
+/// Frame timer polls a callback waits at most for the ack of the next granted
+/// buffer (xen_shm); a lost ack must not stop the app.
+#[cfg(feature = "xen")]
 const MAX_SHM_HELD: u32 = 8;
 
 impl BufferHandler for WprsServerState {
@@ -822,6 +843,43 @@ pub fn set_xdg_toplevel_attributes(
     Ok(())
 }
 
+/// Copies a committed buffer into the surface's next granted buffer (xen_shm)
+/// if the client maps them, and sets it as the surface's buffer. Returns false
+/// if the pixels have to go over the stream.
+#[cfg(feature = "xen")]
+#[instrument(skip_all, level = "debug")]
+fn commit_shm(
+    state: &mut WprsServerState,
+    surface_data: &SurfaceData,
+    buffer: &wl_buffer::WlBuffer,
+    damage: &[Damage],
+    surface_state: &mut SurfaceState,
+    surface_state_to_send: &mut SurfaceState,
+) -> Result<bool> {
+    let Some(shm) = &mut state.shm else {
+        return Ok(false);
+    };
+    let (requests, slot) = compositor_utils::with_buffer_contents(buffer, |data, spec| {
+        let damage = buffer_damage(damage, surface_state, Some((spec.width, spec.height)));
+        shm.commit(surface_data, &spec, data, &damage)
+    })
+    .location(loc!())?
+    .location(loc!())?;
+    for request in requests {
+        state.serializer.writer().send(SendType::Object(request));
+    }
+    let Some((metadata, slot)) = slot else {
+        return Ok(false);
+    };
+    let buffer = BufferAssignment::New(Buffer {
+        metadata,
+        data: BufferData::Shm(slot),
+    });
+    surface_state.buffer = Some(buffer.clone());
+    surface_state_to_send.buffer = Some(buffer);
+    Ok(true)
+}
+
 /// The surface's damage in buffer coordinates.
 fn buffer_damage(
     damage: &[Damage],
@@ -899,6 +957,7 @@ pub fn commit_impl(
 
     if !frame_callbacks.is_empty() {
         let surface = surface.clone();
+        #[cfg(feature = "xen")]
         let mut shm_held = 0;
         state
             .lh
@@ -918,21 +977,26 @@ pub fn commit_impl(
 
                     // Back pressure: while the client hasn't taken the
                     // previous frames, hold the callback, so the app draws
-                    // at the rate the link sustains instead of filling an
-                    // unbounded queue (wprsd OOM-killed during video).
-                    // Same for a granted buffer wprsc hasn't acked yet, but
-                    // not forever.
-                    let shm_busy = shm_held < MAX_SHM_HELD
-                        && state.shm.as_ref().is_some_and(|shm| {
-                            compositor::with_states(&surface, |data| shm.next_busy(data))
-                        });
-                    if shm_busy {
-                        shm_held += 1;
-                    }
-                    if state.serializer.other_end_connected()
-                        && state.serializer.queued() <= MAX_QUEUED_FOR_FRAME
-                        && !shm_busy
-                    {
+                    // at the rate the link sustains. Same for a granted
+                    // buffer the client hasn't acked yet, but not forever.
+                    #[cfg(feature = "xen")]
+                    let shm_busy = {
+                        let busy = shm_held < MAX_SHM_HELD
+                            && state.shm.as_ref().is_some_and(|shm| {
+                                compositor::with_states(&surface, |data| shm.next_busy(data))
+                            });
+                        if busy {
+                            shm_held += 1;
+                        }
+                        busy
+                    };
+                    #[cfg(not(feature = "xen"))]
+                    let shm_busy = false;
+                    if frame_callback_ready(
+                        state.serializer.other_end_connected(),
+                        state.serializer.queued(),
+                        shm_busy,
+                    ) {
                         // We can't use into_iter() because we can't move
                         // frame_callbacks because this is a FnMut. However, this
                         // works because this branch will only ever be taken once.
@@ -986,46 +1050,34 @@ pub fn commit_impl(
     debug!("buffer assignment: {:?}", &surface_attributes.buffer);
     match &surface_attributes.buffer {
         Some(SmithayBufferAssignment::NewBuffer(buffer)) if !skip_buffer => {
-            // Into the next granted buffer if wprsc maps them (xen_shm).
-            let (shm_requests, shm_slot) = match &mut state.shm {
-                Some(shm) => compositor_utils::with_buffer_contents(buffer, |data, spec| {
-                    let damage = buffer_damage(
-                        &surface_attributes.damage,
-                        surface_state,
-                        Some((spec.width, spec.height)),
-                    );
-                    shm.commit(surface_data, &spec, data, &damage)
-                })
-                .location(loc!())?
-                .location(loc!())?,
-                None => (Vec::new(), None),
-            };
-            for request in shm_requests {
-                state.serializer.writer().send(SendType::Object(request));
-            }
+            #[cfg(feature = "xen")]
+            let sent_through_shm = commit_shm(
+                state,
+                surface_data,
+                buffer,
+                &surface_attributes.damage,
+                surface_state,
+                &mut surface_state_to_send,
+            )
+            .location(loc!())?;
+            #[cfg(not(feature = "xen"))]
+            let sent_through_shm = false;
 
-            if let Some((metadata, slot)) = shm_slot {
-                let buffer = BufferAssignment::New(Buffer {
-                    metadata,
-                    data: BufferData::Shm(slot),
-                });
-                surface_state.buffer = Some(buffer.clone());
-                surface_state_to_send.buffer = Some(buffer);
-            } else {
+            if !sent_through_shm {
                 compositor_utils::with_buffer_contents(buffer, |data, spec| {
                     surface_state.set_buffer(&spec, data, &mut state.compressor)
                 })
                 .location(loc!())?
                 .location(loc!())?;
 
-                // Back pressure: the frame callbacks alone don't stop apps
-                // (Firefox draws on with its own timer, video has its own
-                // clock), so while wprsc doesn't take the frames, keep only the
-                // newest one per surface instead of queueing every frame
-                // (wprsd grew ~120 MB/s with wprsc stalled, OOM-killed).
-                if state.serializer.other_end_connected()
-                    && state.serializer.queued() > MAX_QUEUED_FOR_FRAME
-                {
+                // Back pressure: the frame callbacks alone don't stop apps that
+                // draw on their own timer, so while the client doesn't take
+                // the frames, keep only the newest one per surface instead of
+                // queueing every frame.
+                if defer_frame(
+                    state.serializer.other_end_connected(),
+                    state.serializer.queued(),
+                ) {
                     deferred = true;
                     if state.deferred_frames.insert(surface.id()) {
                         schedule_deferred_frame(state, surface.clone());
@@ -1420,3 +1472,32 @@ smithay::delegate_output!(WprsServerState);
 smithay::delegate_primary_selection!(WprsServerState);
 smithay::delegate_data_control!(WprsServerState);
 smithay::delegate_viewporter!(WprsServerState);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_full_above_limit() {
+        assert!(!queue_full(0));
+        assert!(!queue_full(MAX_QUEUED_FOR_FRAME));
+        assert!(queue_full(MAX_QUEUED_FOR_FRAME + 1));
+    }
+
+    #[test]
+    fn frame_callback_waits_for_client_queue_and_buffer() {
+        assert!(frame_callback_ready(true, 0, false));
+        assert!(frame_callback_ready(true, MAX_QUEUED_FOR_FRAME, false));
+        assert!(!frame_callback_ready(false, 0, false));
+        assert!(!frame_callback_ready(true, MAX_QUEUED_FOR_FRAME + 1, false));
+        assert!(!frame_callback_ready(true, 0, true));
+    }
+
+    #[test]
+    fn frames_are_only_deferred_while_connected_and_queue_full() {
+        assert!(defer_frame(true, MAX_QUEUED_FOR_FRAME + 1));
+        assert!(!defer_frame(true, MAX_QUEUED_FOR_FRAME));
+        // A disconnected client gets every surface again on reconnect.
+        assert!(!defer_frame(false, MAX_QUEUED_FOR_FRAME + 1));
+    }
+}

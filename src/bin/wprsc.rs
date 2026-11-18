@@ -37,6 +37,8 @@ use wprs::prelude::*;
 use wprs::serialization;
 use wprs::serialization::Serializer;
 use wprs::utils;
+#[cfg(feature = "xen")]
+use wprs::xen_shm;
 
 #[optional_struct]
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -58,6 +60,7 @@ pub struct WprscConfig {
     pub title_prefix: String,
     pub app_id_prefix: String,
     pub deny_fullscreen: bool,
+    #[cfg(feature = "xen")]
     #[optional_wrap]
     pub xen_grant_socket: Option<PathBuf>,
 }
@@ -76,6 +79,7 @@ impl Default for WprscConfig {
             title_prefix: String::new(),
             app_id_prefix: String::new(),
             deny_fullscreen: false,
+            #[cfg(feature = "xen")]
             xen_grant_socket: None,
         }
     }
@@ -107,8 +111,10 @@ impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
         let title_prefix = args::title_prefix();
         let app_id_prefix = args::app_id_prefix();
         let deny_fullscreen = deny_fullscreen();
+        #[cfg(feature = "xen")]
         let xen_grant_socket = args::xen_grant_socket();
-        bpaf::construct!(Self {
+        #[cfg(feature = "xen")]
+        let parser = bpaf::construct!(Self {
             print_default_config_and_exit,
             config_file,
             socket,
@@ -121,9 +127,22 @@ impl OptionalConfig<WprscConfig> for OptionalWprscConfig {
             app_id_prefix,
             deny_fullscreen,
             xen_grant_socket,
-        })
-        .to_options()
-        .run()
+        });
+        #[cfg(not(feature = "xen"))]
+        let parser = bpaf::construct!(Self {
+            print_default_config_and_exit,
+            config_file,
+            socket,
+            control_socket,
+            log_file,
+            stderr_log_level,
+            file_log_level,
+            log_priv_data,
+            title_prefix,
+            app_id_prefix,
+            deny_fullscreen,
+        });
+        parser.to_options().run()
     }
 
     fn print_default_config_and_exit(&self) -> Option<bool> {
@@ -145,6 +164,9 @@ fn main() -> Result<()> {
     )
     .location(loc!())?;
     utils::exit_on_thread_panic();
+
+    #[cfg(feature = "xen")]
+    let xen_grant_socket = xen_shm::seccomp::restrict_if_configured(config.xen_grant_socket);
 
     let conn = Connection::connect_to_env().map_err(|e| match e {
         // give a more helpful/actionable message, since people who aren't familiar with wayland will run into this
@@ -173,7 +195,8 @@ fn main() -> Result<()> {
         title_prefix: config.title_prefix,
         app_id_prefix: config.app_id_prefix,
         deny_fullscreen: config.deny_fullscreen,
-        xen_grant_socket: config.xen_grant_socket,
+        #[cfg(feature = "xen")]
+        xen_grant_socket,
     };
     let mut state = WprsClientState::new(
         event_queue.handle(),

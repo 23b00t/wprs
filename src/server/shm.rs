@@ -32,9 +32,13 @@ use crate::filtering;
 use crate::prelude::*;
 use crate::serialization::Request;
 use crate::serialization::geometry::Rectangle;
+use crate::serialization::wayland::BufferAssignment;
+use crate::serialization::wayland::BufferData;
 use crate::serialization::wayland::BufferMetadata;
+use crate::serialization::wayland::CompressedBufferData;
 use crate::serialization::wayland::ShmBuffer;
 use crate::serialization::wayland::ShmSlot;
+use crate::serialization::wayland::SurfaceState;
 use crate::sharding_compression::CompressedShards;
 use crate::sharding_compression::ShardingCompressor;
 use crate::xen_shm;
@@ -142,6 +146,7 @@ impl ShmServer {
     /// Copies a committed buffer into the surface's next granted buffer.
     /// Returns the messages to send first and the buffer to commit with, None:
     /// send the pixels over the stream.
+    #[instrument(skip_all, level = "debug")]
     pub fn commit(
         &mut self,
         surface_data: &SurfaceData,
@@ -182,9 +187,9 @@ impl ShmServer {
                     self.retry_after = None;
                 },
                 Err(e) => {
-                    // Most likely the gntalloc limit (grants left for the
-                    // VM's devices) or the broker is gone: this surface stays
-                    // on the stream, the next new buffer tries again later.
+                    // Out of grants (gntalloc limit) or the broker is gone: this
+                    // surface stays on the stream, the next new buffer tries
+                    // again later.
                     warn!("granting buffers failed, sending pixels over the stream: {e:?}");
                     self.retry_after = Some(Instant::now() + RETRY_ALLOC);
                     return Ok((out, None));
@@ -245,7 +250,7 @@ impl ShmServer {
 
 /// The surface's last written buffer, compressed for the stream (a new wprsc
 /// gets the current contents of all surfaces).
-pub fn latest_frame(
+fn latest_frame(
     surface_data: &SurfaceData,
     compressor: &mut ShardingCompressor,
 ) -> Option<CompressedShards> {
@@ -263,4 +268,25 @@ pub fn latest_frame(
     // guard, which outlives data.
     let data = unsafe { BufferPointer::new(&ptr, len) };
     Some(filtering::filter_and_compress(data, compressor))
+}
+
+/// For a new wprsc: replaces a granted buffer in `surface_state` with its
+/// current contents, compressed for the stream.
+#[instrument(skip_all, level = "debug")]
+pub fn buffer_for_stream(
+    mut surface_state: SurfaceState,
+    surface_data: &SurfaceData,
+    compressor: &mut ShardingCompressor,
+) -> SurfaceState {
+    if let Some(BufferAssignment::New(buffer)) = &mut surface_state.buffer
+        && buffer.data.is_shm()
+    {
+        match latest_frame(surface_data, compressor) {
+            Some(shards) => {
+                buffer.data = BufferData::Compressed(CompressedBufferData(Arc::new(shards)));
+            },
+            None => surface_state.buffer = None,
+        }
+    }
+    surface_state
 }

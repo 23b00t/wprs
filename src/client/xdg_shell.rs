@@ -39,6 +39,17 @@ use crate::serialization::xdg_shell::XdgPopupId;
 use crate::serialization::xdg_shell::XdgPositioner;
 use crate::serialization::xdg_shell::XdgToplevelId;
 
+/// A window's title or app id with the configured prefix. Windows without a
+/// value get the prefix alone, without trailing whitespace; None if there is
+/// neither.
+fn with_prefix(prefix: &str, value: Option<&str>) -> Option<String> {
+    match value {
+        Some(value) => Some(format!("{prefix}{value}")),
+        None if prefix.is_empty() => None,
+        None => Some(prefix.trim_end().to_owned()),
+    }
+}
+
 #[derive(Debug)]
 pub struct RemoteXdgToplevel {
     pub client: ClientId,
@@ -80,12 +91,12 @@ impl RemoteXdgToplevel {
 
         let local_window =
             xdg_shell_state.create_window(local_surface, WindowDecorations::ServerDefault, qh);
-        // Until the remote window sets a title (it may never do so).
-        if !title_prefix.is_empty() {
-            local_window.set_title(title_prefix.trim_end());
+        // Until the remote window sets them (it may never do so).
+        if let Some(title) = with_prefix(title_prefix, None) {
+            local_window.set_title(title);
         }
-        if !app_id_prefix.is_empty() {
-            local_window.set_app_id(app_id_prefix.trim_end());
+        if let Some(app_id) = with_prefix(app_id_prefix, None) {
+            local_window.set_app_id(app_id);
         }
 
         {
@@ -152,15 +163,8 @@ impl RemoteXdgToplevel {
     fn set_title(&mut self, title: Option<String>) {
         if self.title != title {
             self.title = title;
-            match &self.title {
-                Some(title) => self
-                    .local_window
-                    .set_title(format!("{}{}", self.title_prefix, title)),
-                // Windows without a title must still carry the prefix.
-                None if !self.title_prefix.is_empty() => {
-                    self.local_window.set_title(self.title_prefix.trim_end())
-                },
-                None => {},
+            if let Some(title) = with_prefix(&self.title_prefix, self.title.as_deref()) {
+                self.local_window.set_title(title);
             }
         }
     }
@@ -168,15 +172,8 @@ impl RemoteXdgToplevel {
     fn set_app_id(&mut self, app_id: Option<String>) {
         if self.app_id != app_id {
             self.app_id = app_id;
-            match &self.app_id {
-                Some(app_id) => self
-                    .local_window
-                    .set_app_id(format!("{}{}", self.app_id_prefix, app_id)),
-                // Windows without an app id must still carry the prefix.
-                None if !self.app_id_prefix.is_empty() => {
-                    self.local_window.set_app_id(self.app_id_prefix.trim_end())
-                },
-                None => {},
+            if let Some(app_id) = with_prefix(&self.app_id_prefix, self.app_id.as_deref()) {
+                self.local_window.set_app_id(app_id);
             }
         }
     }
@@ -457,5 +454,26 @@ impl RemoteXdgPopup {
         .location(loc!())?;
         let surface = surfaces.get_mut(&surface_id).location(loc!())?;
         Self::update(surface_state, surface, xdg_shell_state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_prefix_adds_prefix_to_value() {
+        assert_eq!(
+            with_prefix("remote: ", Some("title")),
+            Some("remote: title".to_owned())
+        );
+        assert_eq!(with_prefix("", Some("title")), Some("title".to_owned()));
+    }
+
+    #[test]
+    fn with_prefix_without_value_trims_prefix() {
+        assert_eq!(with_prefix("remote: ", None), Some("remote:".to_owned()));
+        assert_eq!(with_prefix("remote", None), Some("remote".to_owned()));
+        assert_eq!(with_prefix("", None), None);
     }
 }

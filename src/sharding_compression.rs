@@ -529,10 +529,9 @@ impl ShardingDecompressor {
             .location(loc!())?;
         self.collect_shards(indices.len());
 
-        // Copy the frame out and keep the buffer. Replacing the 36 MB buffer
-        // per frame mapped fresh zero pages every time (calloc above glibc's
-        // mmap threshold): one page fault per 4 KiB written, each a hypercall
-        // in a Xen PV dom0, and a munmap per frame.
+        // Copy the frame out and keep the buffer: handing it out and allocating
+        // a fresh zeroed one per frame costs more (page faults on every page
+        // the decompressors write) than the copy.
         // We dropped mut_buf and all the buffers in the decompressor threads
         // have been freed already, so this should never fail.
         let data = self.buffer.try_const().unwrap().split_to(uncompressed_size);

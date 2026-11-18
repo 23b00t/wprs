@@ -40,6 +40,8 @@ use wprs::serialization::Serializer;
 use wprs::server::WprsServerState;
 use wprs::server::smithay_handlers::ClientState;
 use wprs::utils;
+#[cfg(feature = "xen")]
+use wprs::xen_shm;
 
 #[optional_struct]
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -65,6 +67,8 @@ pub struct WprsdConfig {
     xwayland_xdg_shell_args: Vec<String>,
     kde_server_side_decorations: bool,
     selection_sync: bool,
+    data_control: bool,
+    #[cfg(feature = "xen")]
     #[optional_wrap]
     xen_grant_socket: Option<PathBuf>,
 }
@@ -87,6 +91,8 @@ impl Default for WprsdConfig {
             xwayland_xdg_shell_args: Vec::new(),
             kde_server_side_decorations: false,
             selection_sync: true,
+            data_control: false,
+            #[cfg(feature = "xen")]
             xen_grant_socket: None,
         }
     }
@@ -135,7 +141,14 @@ fn kde_server_side_decorations() -> impl Parser<Option<bool>> {
 fn selection_sync() -> impl Parser<Option<bool>> {
     bpaf::long("selection-sync")
         .argument::<bool>("BOOL")
-        .help("Whether to sync the clipboard and primary selection with the client. When false, selections stay on the server side (e.g. to isolate a VM's clipboard from the host's); local clients can still use them, including via wlr-data-control (wl-copy/wl-paste).")
+        .help("Whether to sync the clipboard and primary selection with the client. When false, selections stay on the server side; local clients can still use them.")
+        .optional()
+}
+
+fn data_control() -> impl Parser<Option<bool>> {
+    bpaf::long("data-control")
+        .argument::<bool>("BOOL")
+        .help("Whether to offer the wlr-data-control protocol to local clients (e.g. wl-copy and wl-paste), which lets them read and set the clipboard and primary selection without a window.")
         .optional()
 }
 
@@ -156,8 +169,11 @@ impl OptionalConfig<WprsdConfig> for OptionalWprsdConfig {
         let xwayland_xdg_shell_args = xwayland_xdg_shell_args();
         let kde_server_side_decorations = kde_server_side_decorations();
         let selection_sync = selection_sync();
+        let data_control = data_control();
+        #[cfg(feature = "xen")]
         let xen_grant_socket = args::xen_grant_socket();
-        bpaf::construct!(Self {
+        #[cfg(feature = "xen")]
+        let parser = bpaf::construct!(Self {
             print_default_config_and_exit,
             config_file,
             wayland_display,
@@ -173,10 +189,29 @@ impl OptionalConfig<WprsdConfig> for OptionalWprsdConfig {
             xwayland_xdg_shell_args,
             kde_server_side_decorations,
             selection_sync,
+            data_control,
             xen_grant_socket,
-        })
-        .to_options()
-        .run()
+        });
+        #[cfg(not(feature = "xen"))]
+        let parser = bpaf::construct!(Self {
+            print_default_config_and_exit,
+            config_file,
+            wayland_display,
+            socket,
+            framerate,
+            log_file,
+            stderr_log_level,
+            file_log_level,
+            log_priv_data,
+            enable_xwayland,
+            xwayland_xdg_shell_path,
+            xwayland_xdg_shell_wayland_debug,
+            xwayland_xdg_shell_args,
+            kde_server_side_decorations,
+            selection_sync,
+            data_control,
+        });
+        parser.to_options().run()
     }
 
     fn print_default_config_and_exit(&self) -> Option<bool> {
@@ -261,6 +296,9 @@ pub fn main() -> Result<()> {
     .location(loc!())?;
     utils::exit_on_thread_panic();
 
+    #[cfg(feature = "xen")]
+    let xen_grant_socket = xen_shm::seccomp::restrict_if_configured(config.xen_grant_socket);
+
     fs::create_dir_all(config.socket.parent().location(loc!())?).location(loc!())?;
     let mut serializer = Serializer::new_server(&config.socket).location(loc!())?;
     let reader = serializer.reader().location(loc!())?;
@@ -278,8 +316,10 @@ pub fn main() -> Result<()> {
         frame_interval,
         config.kde_server_side_decorations,
         config.selection_sync,
+        config.data_control,
+        #[cfg(feature = "xen")]
+        xen_grant_socket,
     );
-    state.xen_grant_socket = config.xen_grant_socket.clone();
 
     init_wayland_listener(&config.wayland_display, display, &mut state, &event_loop)
         .location(loc!())?;

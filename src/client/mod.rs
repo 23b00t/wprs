@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+#[cfg(feature = "xen")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -63,6 +64,7 @@ use crate::serialization::ClientId;
 use crate::serialization::Event;
 use crate::serialization::ObjectId;
 use crate::serialization::Request;
+#[cfg(feature = "xen")]
 use crate::serialization::SendType;
 use crate::serialization::Serializer;
 use crate::serialization::geometry::Point;
@@ -72,15 +74,20 @@ use crate::serialization::wayland::BufferAssignment;
 use crate::serialization::wayland::BufferData;
 use crate::serialization::wayland::BufferMetadata;
 use crate::serialization::wayland::Region;
+#[cfg(feature = "xen")]
+use crate::serialization::wayland::ShmSlot;
 use crate::serialization::wayland::SubsurfacePosition;
 use crate::serialization::wayland::UncompressedBufferData;
 use crate::serialization::wayland::ViewportState;
 use crate::serialization::wayland::WlSurfaceId;
 use crate::vec4u8::Vec4u8s;
+#[cfg(feature = "xen")]
 use crate::xen_shm;
+#[cfg(feature = "xen")]
 use crate::xen_shm::MappedBuffer;
 
 pub mod server_handlers;
+#[cfg(feature = "xen")]
 pub mod shm;
 pub mod smithay_handlers;
 mod subsurface;
@@ -111,7 +118,8 @@ pub struct ClientOptions {
     pub title_prefix: String,
     pub app_id_prefix: String,
     pub deny_fullscreen: bool,
-    /// Map wprsd's granted buffers (xen_shm) through this broker socket.
+    /// Map the granted buffers of wprsd (xen_shm) through this broker socket.
+    #[cfg(feature = "xen")]
     pub xen_grant_socket: Option<PathBuf>,
 }
 
@@ -159,6 +167,7 @@ pub struct WprsClientState {
     title_prefix: String,
     app_id_prefix: String,
     deny_fullscreen: bool,
+    #[cfg(feature = "xen")]
     pub shm: Option<shm::ShmClient>,
 
     buffer_cache: Option<UncompressedBufferData>,
@@ -230,6 +239,7 @@ impl WprsClientState {
             title_prefix: options.title_prefix,
             app_id_prefix: options.app_id_prefix,
             deny_fullscreen: options.deny_fullscreen,
+            #[cfg(feature = "xen")]
             shm: options.xen_grant_socket.and_then(|socket| {
                 shm::ShmClient::new(&socket)
                     .context(
@@ -241,6 +251,7 @@ impl WprsClientState {
             }),
             buffer_cache: None,
         };
+        #[cfg(feature = "xen")]
         if state.shm.is_some() {
             state
                 .serializer
@@ -281,6 +292,7 @@ impl RemoteBuffer {
         })
     }
 
+    #[cfg(feature = "xen")]
     fn new_empty(metadata: BufferMetadata, pool: &mut SlotPool) -> Result<Self> {
         let active_buffer = pool
             .create_buffer(
@@ -300,6 +312,8 @@ impl RemoteBuffer {
     }
 
     /// Copies the damaged parts (None: everything) of a granted buffer.
+    #[cfg(feature = "xen")]
+    #[instrument(skip_all, level = "debug")]
     fn copy_from(
         &mut self,
         src: &MappedBuffer,
@@ -323,7 +337,7 @@ impl RemoteBuffer {
                 pool.canvas(&self.active_buffer).location(loc!())?
             },
         };
-        // The metadata comes from the VM: checked, without overflow
+        // The metadata comes from the other end: checked, without overflow
         let len = xen_shm::image_len(
             self.metadata.stride,
             self.metadata.width,
@@ -560,14 +574,21 @@ impl RemoteSurface {
         Ok(())
     }
 
-    fn set_buffer_shm(
+    /// Sets the buffer from a granted buffer (xen_shm), copying its damaged
+    /// parts (None: everything).
+    #[cfg(feature = "xen")]
+    #[instrument(skip(self, shm, pool), level = "debug")]
+    pub fn apply_shm_buffer(
         &mut self,
         metadata: BufferMetadata,
-        src: &MappedBuffer,
-        damage: Option<&[Rectangle<i32>]>,
+        id: ShmSlot,
+        shm: Option<&shm::ShmClient>,
+        mut damage: Option<&[Rectangle<i32>]>,
         pool: &mut SlotPool,
     ) -> Result<()> {
-        let mut damage = damage;
+        let src = shm
+            .and_then(|shm| shm.get(id))
+            .ok_or_else(|| anyhow!("unknown granted buffer {id:?}"))?;
         if self
             .buffer
             .as_ref()
@@ -589,26 +610,14 @@ impl RemoteSurface {
         wl_surface.attach(None, 0, 0);
     }
 
-    #[instrument(skip(self, pool, shm), level = "debug")]
+    #[instrument(skip(self, pool), level = "debug")]
     pub fn apply_buffer(
         &mut self,
         new_buffer: Option<BufferAssignment>,
         buffer_cache: &mut Option<UncompressedBufferData>,
         pool: &mut SlotPool,
-        shm: Option<&shm::ShmClient>,
-        damage: Option<&[Rectangle<i32>]>,
     ) -> Result<()> {
         match new_buffer {
-            Some(BufferAssignment::New(Buffer {
-                metadata,
-                data: BufferData::Shm(id),
-            })) => {
-                let src = shm
-                    .and_then(|shm| shm.get(id))
-                    .ok_or_else(|| anyhow!("unknown granted buffer {id:?}"))?;
-                self.set_buffer_shm(metadata, src, damage, pool)
-                    .location(loc!())?;
-            },
             Some(BufferAssignment::New(mut new_buffer)) => {
                 if !new_buffer.data.is_external() {
                     return Err(anyhow!(

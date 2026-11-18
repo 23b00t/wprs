@@ -220,10 +220,11 @@ pub fn log_file() -> impl Parser<Option<Option<PathBuf>>> {
         .map(|log_file| log_file.map(Some))
 }
 
+#[cfg(feature = "xen")]
 pub fn xen_grant_socket() -> impl Parser<Option<Option<PathBuf>>> {
     bpaf::long("xen-grant-socket")
         .argument::<PathBuf>("PATH")
-        .help("Pixels over Xen grant-shared memory instead of the stream (wprsd in a guest, wprsc in dom0, needs the xen feature): the grant broker's socket of this side (nox-relay's `grants` rule). Falls back to the stream if the other side can't.")
+        .help("Send pixels over Xen grant-shared memory instead of the stream, through the grant broker listening on this socket (wprsd runs in a guest, wprsc in dom0). Falls back to the stream if the other side can't.")
         .optional()
         .map(|path| path.map(Some))
 }
@@ -241,7 +242,7 @@ pub fn log_priv_data() -> impl Parser<Option<bool>> {
 pub fn title_prefix() -> impl Parser<Option<String>> {
     bpaf::long("title-prefix")
         .argument::<String>("STRING")
-        .help("Prefix windows titles with a string.")
+        .help("Prefix windows titles with a string. Windows without a title get the prefix alone, without trailing whitespace.")
         .optional()
 }
 

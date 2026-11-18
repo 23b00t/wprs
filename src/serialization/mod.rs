@@ -124,8 +124,10 @@ pub enum Request {
     ClientDisconnected(ClientId),
     Capabilities(Capabilities),
     /// A new granted buffer (xen_shm), before the commit that uses it.
+    #[cfg(feature = "xen")]
     ShmBuffer(wayland::ShmBuffer),
     /// The granted buffer is gone, wprsc unmaps it.
+    #[cfg(feature = "xen")]
     ShmRelease(wayland::ShmSlot),
 }
 
@@ -140,10 +142,13 @@ pub enum Event {
     Data(wayland::DataEvent),
     Surface(wayland::SurfaceEvent),
     /// wprsc can map granted buffers (xen_shm), sent after WprsClientConnect.
+    #[cfg(feature = "xen")]
     ShmSupported,
     /// wprsc has copied the granted buffer, wprsd may write it again.
+    #[cfg(feature = "xen")]
     ShmAck(wayland::ShmSlot),
     /// wprsc couldn't map a granted buffer: wprsd goes back to the stream.
+    #[cfg(feature = "xen")]
     ShmFailed,
 }
 

@@ -39,7 +39,12 @@ use crate::serialization::Request;
 use crate::serialization::SendType;
 use crate::serialization::tuple::Tuple2;
 use crate::serialization::wayland;
+#[cfg(feature = "xen")]
+use crate::serialization::wayland::Buffer;
+#[cfg(feature = "xen")]
 use crate::serialization::wayland::BufferAssignment;
+#[cfg(feature = "xen")]
+use crate::serialization::wayland::BufferData;
 use crate::serialization::wayland::ClientSurface;
 use crate::serialization::wayland::CursorImage;
 use crate::serialization::wayland::CursorImageStatus;
@@ -49,6 +54,7 @@ use crate::serialization::wayland::DataRequest;
 use crate::serialization::wayland::DataSource;
 use crate::serialization::wayland::DataSourceRequest;
 use crate::serialization::wayland::DataToTransfer;
+#[cfg(feature = "xen")]
 use crate::serialization::wayland::ShmBuffer;
 use crate::serialization::wayland::SurfaceRequest;
 use crate::serialization::wayland::SurfaceRequestPayload;
@@ -86,25 +92,32 @@ impl WprsClientState {
                 })
                 .location(loc!())?;
 
-            // A granted buffer is acked even if copying it failed, so wprsd
-            // doesn't wait for it.
-            let shm_ack = match &surface_state.buffer {
-                Some(BufferAssignment::New(buffer)) => buffer.data.as_shm().copied(),
-                _ => None,
+            let buffer = surface_state.buffer.take();
+            #[cfg(feature = "xen")]
+            let buffer = match buffer {
+                Some(BufferAssignment::New(Buffer {
+                    metadata,
+                    data: BufferData::Shm(id),
+                })) => {
+                    let applied = remote_surface.apply_shm_buffer(
+                        metadata,
+                        id,
+                        self.shm.as_ref(),
+                        surface_state.damage.as_deref(),
+                        &mut self.pool,
+                    );
+                    // Acked even if copying failed, so wprsd doesn't wait.
+                    self.serializer
+                        .writer()
+                        .send(SendType::Object(Event::ShmAck(id)));
+                    applied.location(loc!())?;
+                    None
+                },
+                buffer => buffer,
             };
-            let applied = remote_surface.apply_buffer(
-                surface_state.buffer.take(),
-                &mut self.buffer_cache,
-                &mut self.pool,
-                self.shm.as_ref(),
-                surface_state.damage.as_deref(),
-            );
-            if let Some(id) = shm_ack {
-                self.serializer
-                    .writer()
-                    .send(SendType::Object(Event::ShmAck(id)));
-            }
-            applied.location(loc!())?;
+            remote_surface
+                .apply_buffer(buffer, &mut self.buffer_cache, &mut self.pool)
+                .location(loc!())?;
 
             remote_surface.set_transformation(
                 surface_state.buffer_scale,
@@ -596,6 +609,7 @@ impl WprsClientState {
             .location(loc!())
     }
 
+    #[cfg(feature = "xen")]
     #[instrument(skip_all, level = "debug")]
     fn handle_shm_buffer(&mut self, buffer: ShmBuffer) -> Result<()> {
         let Some(shm) = &mut self.shm else {
@@ -632,7 +646,9 @@ impl WprsClientState {
                 self.handle_client_disconnected(client)
             },
             RecvType::Object(Request::Capabilities(caps)) => self.handle_capabilities(caps),
+            #[cfg(feature = "xen")]
             RecvType::Object(Request::ShmBuffer(buffer)) => self.handle_shm_buffer(buffer),
+            #[cfg(feature = "xen")]
             RecvType::Object(Request::ShmRelease(id)) => {
                 if let Some(shm) = &mut self.shm {
                     shm.release(id);

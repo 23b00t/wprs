@@ -19,9 +19,9 @@ use std::fs::File;
 use std::io::Read;
 use std::io::Write;
 use std::mem;
+#[cfg(feature = "xen")]
 use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
-use std::sync::Arc;
 use std::thread;
 
 use nix::fcntl::OFlag;
@@ -59,9 +59,6 @@ use crate::serialization::Event;
 use crate::serialization::RecvType;
 use crate::serialization::Request;
 use crate::serialization::SendType;
-use crate::serialization::wayland::BufferAssignment;
-use crate::serialization::wayland::BufferData;
-use crate::serialization::wayland::CompressedBufferData;
 use crate::serialization::wayland::DataDestinationEvent;
 use crate::serialization::wayland::DataEvent;
 use crate::serialization::wayland::DataRequest;
@@ -86,8 +83,10 @@ use crate::serialization::xdg_shell::ToplevelConfigure;
 use crate::serialization::xdg_shell::ToplevelEvent;
 use crate::server::LockedSurfaceState;
 use crate::server::WprsServerState;
+#[cfg(feature = "xen")]
 use crate::server::shm;
 use crate::server::smithay_handlers::DndGrab;
+#[cfg(feature = "xen")]
 use crate::sharding_compression::ShardingCompressor;
 
 enum UnknownSurfaceErr {
@@ -474,11 +473,9 @@ impl WprsServerState {
                     }
                 }
 
-                // The compositor's state is authoritative for held modifiers
-                // as well: a modifier release that never reached us as a key
-                // event (e.g. focus moved by a compositor binding while it was
-                // held) would otherwise stay pressed here and turn every key
-                // into Super+key etc.
+                // The compositor's modifier state is authoritative for held
+                // modifiers too: release the ones still pressed here whose
+                // release never arrived as a key event.
                 let mod_state = keyboard.modifier_state();
                 for (new_modifier, current_modifier, keycodes) in [
                     (
@@ -504,6 +501,9 @@ impl WprsServerState {
                 ] {
                     if current_modifier && !new_modifier {
                         for keycode in keycodes {
+                            if !self.pressed_keys.contains(&keycode) {
+                                continue;
+                            }
                             self.set_key_state(
                                 keycode,
                                 KeyState::Released,
@@ -662,6 +662,7 @@ impl WprsServerState {
         Ok(())
     }
 
+    #[cfg(feature = "xen")]
     #[instrument(skip_all, level = "debug")]
     fn handle_shm_supported(&mut self) -> Result<()> {
         let Some(socket) = &self.xen_grant_socket else {
@@ -681,11 +682,13 @@ impl WprsServerState {
     fn handle_connect(&mut self) -> Result<()> {
         // TODO: sync client outputs
         self.serializer.set_other_end_connected(true);
-        // A new wprsc: no buffers mapped yet, it says again whether it can.
-        self.shm = None;
-        self.shm_epoch += 1;
-        let mut compressor =
-            ShardingCompressor::new(NonZeroUsize::new(16).unwrap(), 1).location(loc!())?;
+        #[cfg(feature = "xen")]
+        let mut compressor = {
+            // A new wprsc: no buffers mapped yet, it says again whether it can.
+            self.shm = None;
+            self.shm_epoch += 1;
+            ShardingCompressor::new(NonZeroUsize::new(16).unwrap(), 1).location(loc!())?
+        };
 
         self.serializer
             .writer()
@@ -694,7 +697,7 @@ impl WprsServerState {
             })));
 
         self.for_each_surface(|_, surface_data| {
-            let mut surface_state = surface_data
+            let surface_state = surface_data
                 .data_map
                 .get::<LockedSurfaceState>()
                 .unwrap()
@@ -703,17 +706,9 @@ impl WprsServerState {
                 .unwrap()
                 .clone();
 
-            // Pixels in a granted buffer: send its contents over the stream.
-            if let Some(BufferAssignment::New(buffer)) = &mut surface_state.buffer
-                && buffer.data.is_shm()
-            {
-                match shm::latest_frame(surface_data, &mut compressor) {
-                    Some(shards) => {
-                        buffer.data = BufferData::Compressed(CompressedBufferData(Arc::new(shards)))
-                    },
-                    None => surface_state.buffer = None,
-                }
-            }
+            #[cfg(feature = "xen")]
+            let surface_state =
+                shm::buffer_for_stream(surface_state, surface_data, &mut compressor);
 
             let mut surface_state_to_send = surface_state.clone_without_buffer();
 
@@ -1063,12 +1058,15 @@ impl WprsServerState {
             RecvType::Object(Event::Surface(surface_event)) => {
                 self.handle_surface_event(surface_event)
             },
+            #[cfg(feature = "xen")]
             RecvType::Object(Event::ShmSupported) => self.handle_shm_supported(),
+            #[cfg(feature = "xen")]
             RecvType::Object(Event::ShmFailed) => {
                 warn!("wprsc can't map our granted buffers, back to the stream");
                 self.shm = None;
                 Ok(())
             },
+            #[cfg(feature = "xen")]
             RecvType::Object(Event::ShmAck(id)) => {
                 if let Some(shm) = &self.shm {
                     shm.ack(id);
