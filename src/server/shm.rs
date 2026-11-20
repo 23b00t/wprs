@@ -59,6 +59,31 @@ pub struct ShmServer {
     epoch: u64,
     // After a failed allocation, new buffers wait until then.
     retry_after: Option<Instant>,
+    // Released buffers whose grants end once wprsc has unmapped them.
+    parked: Mutex<Parked<[Slot; 2]>>,
+}
+
+/// Things that stay alive until an ack proves the other end let go of them.
+/// Ids are handed out in increasing order and the stream is ordered: wprsc
+/// acks an id greater than a watermark only after it processed everything
+/// sent before the watermark was taken (a ShmRelease), so by then it has
+/// unmapped the entry.
+#[derive(Debug)]
+struct Parked<T>(Vec<(u64, T)>);
+
+impl<T> Parked<T> {
+    /// `watermark`: every id allocated so far. Ids after it are announced
+    /// after the message that tells wprsc to unmap `value`.
+    fn park(&mut self, watermark: u64, value: T) {
+        self.0.push((watermark, value));
+    }
+
+    /// Drops the entries an ack of `id` frees, returns how many.
+    fn ack(&mut self, id: u64) -> usize {
+        let before = self.0.len();
+        self.0.retain(|(watermark, _)| *watermark >= id);
+        before - self.0.len()
+    }
 }
 
 #[derive(Debug)]
@@ -89,11 +114,16 @@ impl ShmServer {
             next_id: 0,
             epoch,
             retry_after: None,
+            parked: Mutex::new(Parked(Vec::new())),
         })
     }
 
     pub fn ack(&self, id: ShmSlot) {
         self.busy.lock().unwrap().remove(&id);
+        let freed = self.parked.lock().unwrap().ack(id.0);
+        if freed > 0 {
+            debug!("{id:?} acked, ended the grants of {freed} released pairs");
+        }
     }
 
     /// The surface's next buffer is still waiting for wprsc's ack.
@@ -141,6 +171,9 @@ impl ShmServer {
             busy.remove(&slot.id);
             out.push(Request::ShmRelease(slot.id));
         }
+        // Ending the grants before wprsc has unmapped them: dom0 may find them
+        // gone, or the kernel defers ending them, slowly.
+        self.parked.lock().unwrap().park(self.next_id, surf.slots);
     }
 
     /// Copies a committed buffer into the surface's next granted buffer.
@@ -289,4 +322,64 @@ pub fn buffer_for_stream(
         }
     }
     surface_state
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    struct Counted<'a>(&'a AtomicUsize);
+
+    impl Drop for Counted<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn ack_frees_what_was_parked_before_the_acked_id() {
+        let dropped = AtomicUsize::new(0);
+        let mut parked = Parked(Vec::new());
+        parked.park(4, Counted(&dropped));
+        parked.park(6, Counted(&dropped));
+
+        // Not after the watermark yet: wprsc may not have seen the release.
+        assert_eq!(parked.ack(3), 0);
+        assert_eq!(parked.ack(4), 0);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        assert_eq!(parked.ack(5), 1);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        // The same id again frees nothing more.
+        assert_eq!(parked.ack(5), 0);
+
+        assert_eq!(parked.ack(7), 1);
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        assert_eq!(parked.ack(100), 0);
+    }
+
+    #[test]
+    fn one_ack_frees_all_older_entries() {
+        let dropped = AtomicUsize::new(0);
+        let mut parked = Parked(Vec::new());
+        for watermark in [2, 4, 6] {
+            parked.park(watermark, Counted(&dropped));
+        }
+        assert_eq!(parked.ack(7), 3);
+        assert_eq!(dropped.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn dropping_frees_the_rest() {
+        let dropped = AtomicUsize::new(0);
+        let mut parked = Parked(Vec::new());
+        parked.park(4, Counted(&dropped));
+        parked.park(6, Counted(&dropped));
+        assert_eq!(parked.ack(5), 1);
+        drop(parked);
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+    }
 }
